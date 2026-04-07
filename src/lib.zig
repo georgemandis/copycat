@@ -164,6 +164,7 @@ export fn clipboard_change_count() i64 {
 /// Free a pointer previously returned by this library. Specifically:
 ///   - the string returned by clipboard_list_formats()
 ///   - the .data field of a ClipboardData with status == 0 from clipboard_read_format()
+///   - the out_data pointer written by clipboard_read_format_ex() with out_status == 0
 /// Safe to call with null. Do NOT call on pointers from any other source —
 /// doing so is undefined behavior.
 export fn clipboard_free(ptr: ?*anyopaque) void {
