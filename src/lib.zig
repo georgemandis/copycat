@@ -85,6 +85,39 @@ export fn clipboard_read_format(format: [*:0]const u8) ClipboardData {
     }
 }
 
+/// FFI-friendly variant of clipboard_read_format for languages (like Bun) that
+/// cannot receive struct returns by value. Writes the result through the
+/// provided out-pointers instead of returning a struct.
+///
+/// On success: out_status.* == 0, out_data.* points to out_len.* bytes that
+///             the caller MUST free with clipboard_free().
+/// Format absent: out_status.* == 1, out_data.* == null, out_len.* == 0.
+/// Error:  out_status.* == -1, out_data.* == null, out_len.* == 0.
+export fn clipboard_read_format_ex(
+    format: [*:0]const u8,
+    out_data: *?[*]const u8,
+    out_len: *usize,
+    out_status: *i32,
+) void {
+    const format_slice = std.mem.sliceTo(format, 0);
+    const result = clipboard.readFormat(allocator, format_slice) catch {
+        out_data.* = null;
+        out_len.* = 0;
+        out_status.* = -1;
+        return;
+    };
+
+    if (result) |bytes| {
+        out_data.* = bytes.ptr;
+        out_len.* = bytes.len;
+        out_status.* = 0;
+    } else {
+        out_data.* = null;
+        out_len.* = 0;
+        out_status.* = 1;
+    }
+}
+
 /// Write a single format to the clipboard. Clears the clipboard first.
 /// When `len == 0`, `data` may be any value (it will not be dereferenced).
 /// Returns 0 on success, -1 on error.
