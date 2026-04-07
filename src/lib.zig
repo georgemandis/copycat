@@ -66,9 +66,15 @@ export fn clipboard_list_formats() ?[*:0]u8 {
 
 /// Read raw bytes for the given format from the clipboard.
 ///
-/// On success (status == 0), the returned `.data` points to `.len` bytes that
-/// the caller MUST free with clipboard_free(). Zero-length data is valid: a
-/// successful read may return `.len == 0` with `.data` non-null.
+/// On success with non-empty data (status == 0, len > 0): `.data` points to
+/// `.len` bytes that the caller MUST free with clipboard_free().
+///
+/// On success with empty data (status == 0, len == 0): `.data == null`. The
+/// caller MUST NOT call clipboard_free on it. This case is legitimate — a
+/// clipboard entry can exist with zero bytes of content (e.g. an empty text
+/// selection). We represent it with a null pointer because the underlying
+/// Zig allocator returns a sentinel (not a real malloc'd pointer) for
+/// zero-length allocations, which is unsafe to pass to std.c.free.
 ///
 /// If the format is not present on the clipboard, returns status == 1 with
 /// `.data == null`. On any other error, returns status == -1 with `.data == null`.
@@ -79,6 +85,12 @@ export fn clipboard_read_format(format: [*:0]const u8) ClipboardData {
     };
 
     if (result) |bytes| {
+        if (bytes.len == 0) {
+            // Free the allocator's zero-length sentinel with the matching
+            // allocator (not std.c.free) and hand back null to the caller.
+            allocator.free(bytes);
+            return .{ .data = null, .len = 0, .status = 0 };
+        }
         return .{ .data = bytes.ptr, .len = bytes.len, .status = 0 };
     } else {
         return .{ .data = null, .len = 0, .status = 1 };
@@ -89,10 +101,12 @@ export fn clipboard_read_format(format: [*:0]const u8) ClipboardData {
 /// cannot receive struct returns by value. Writes the result through the
 /// provided out-pointers instead of returning a struct.
 ///
-/// On success: out_status.* == 0, out_data.* points to out_len.* bytes that
-///             the caller MUST free with clipboard_free().
-/// Format absent: out_status.* == 1, out_data.* == null, out_len.* == 0.
-/// Error:  out_status.* == -1, out_data.* == null, out_len.* == 0.
+/// Success with non-empty data: out_status == 0, out_len > 0, out_data points
+///   to out_len bytes that the caller MUST free with clipboard_free().
+/// Success with empty data: out_status == 0, out_len == 0, out_data == null.
+///   The caller MUST NOT free out_data. See clipboard_read_format for why.
+/// Format absent: out_status == 1, out_data == null, out_len == 0.
+/// Error: out_status == -1, out_data == null, out_len == 0.
 export fn clipboard_read_format_ex(
     format: [*:0]const u8,
     out_data: *?[*]const u8,
@@ -108,6 +122,16 @@ export fn clipboard_read_format_ex(
     };
 
     if (result) |bytes| {
+        if (bytes.len == 0) {
+            // See clipboard_read_format: free the allocator's zero-length
+            // sentinel and return null so the JS side does not call
+            // std.c.free on a non-malloc'd pointer.
+            allocator.free(bytes);
+            out_data.* = null;
+            out_len.* = 0;
+            out_status.* = 0;
+            return;
+        }
         out_data.* = bytes.ptr;
         out_len.* = bytes.len;
         out_status.* = 0;
