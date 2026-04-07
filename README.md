@@ -66,6 +66,25 @@ Clipboard contents (3 formats, changeCount: 142):
 
 - `--json` — output structured JSON instead of human-readable text (works with the default introspection and `list`)
 
+### Shell completions
+
+Completion scripts for fish, bash, and zsh live in `completions/`. They include dynamic completion for format identifiers: typing `clipboard read <TAB>` will complete against whatever is currently on your clipboard (by shelling out to `clipboard list`).
+
+> **Note:** Dynamic format completion requires `clipboard` to be on your `$PATH`. After `zig build`, either copy or symlink `zig-out/bin/clipboard` into a directory on `$PATH` (e.g. `~/.local/bin`).
+
+```sh
+# fish
+cp completions/clipboard.fish ~/.config/fish/completions/
+
+# bash (user)
+echo "source $PWD/completions/clipboard.bash" >> ~/.bashrc
+
+# zsh — place _clipboard on your $fpath, e.g.:
+mkdir -p ~/.zfunc
+cp completions/_clipboard ~/.zfunc/
+# then ensure ~/.zshrc has: fpath=(~/.zfunc $fpath) && autoload -Uz compinit && compinit
+```
+
 ### Pipe-friendly examples
 
 ```sh
@@ -155,6 +174,7 @@ src/
 ├── objc.zig              # Objective-C runtime helpers (msgSend, NSString/NSData/NSArray bridging)
 └── platform/
     └── macos.zig         # NSPasteboard backend
+completions/              # Shell completions (fish, bash, zsh)
 build.zig                 # Builds both the CLI executable and the .dylib
 ```
 

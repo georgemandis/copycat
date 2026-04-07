@@ -1,0 +1,58 @@
+#compdef clipboard
+#
+# Zsh completions for `clipboard`
+#
+# Install: place this file in a directory on $fpath (e.g. ~/.zfunc) as `_clipboard`,
+# then ensure `autoload -Uz compinit && compinit` runs in your ~/.zshrc.
+
+_clipboard_formats() {
+    local -a formats
+    formats=(${(f)"$(clipboard list 2>/dev/null)"})
+    _describe -t formats 'clipboard format' formats
+}
+
+_clipboard() {
+    local curcontext="$curcontext" state line
+    typeset -A opt_args
+
+    local -a subcommands
+    subcommands=(
+        'list:List format names, one per line'
+        'read:Read format data to stdout or file'
+        'write:Write data to a format'
+        'clear:Clear the clipboard'
+        'watch:Watch for clipboard changes'
+        'help:Show help'
+    )
+
+    _arguments -C \
+        '--json[Output as JSON]' \
+        '(-h --help)'{-h,--help}'[Show help]' \
+        '1: :->cmd' \
+        '*:: :->args'
+
+    case $state in
+        cmd)
+            _describe -t commands 'clipboard command' subcommands
+            ;;
+        args)
+            case $words[1] in
+                read)
+                    _arguments \
+                        '1:format:_clipboard_formats' \
+                        '--out[Write output to file]:file:_files'
+                    ;;
+                write)
+                    _arguments \
+                        '1:format:_clipboard_formats' \
+                        '--data[Inline data to write]:text'
+                    ;;
+                watch)
+                    _arguments '--interval[Poll interval in ms]:milliseconds'
+                    ;;
+            esac
+            ;;
+    esac
+}
+
+_clipboard "$@"

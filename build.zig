@@ -51,4 +51,26 @@ pub fn build(b: *std.Build) void {
 
     const run_step = b.step("run", "Run the clipboard CLI");
     run_step.dependOn(&run_cmd.step);
+
+    // -------------------------------------------------------------------
+    // Unit tests for pure Zig modules (no OS dependencies).
+    // Run with: `zig build test`
+    //
+    // Only modules that are safe to compile without linking Foundation
+    // belong here. `paths.zig` is pure Zig; other modules that call into
+    // Obj-C should NOT be added to this step unless they also link the
+    // appropriate system libraries.
+    // -------------------------------------------------------------------
+    const paths_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/paths.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+
+    const run_paths_tests = b.addRunArtifact(paths_tests);
+
+    const test_step = b.step("test", "Run pure-Zig unit tests");
+    test_step.dependOn(&run_paths_tests.step);
 }
