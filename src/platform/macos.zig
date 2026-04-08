@@ -20,6 +20,9 @@ pub const ClipboardError = error{
     PasteboardUnavailable,
     NoItems,
     WriteFailed,
+    UnsupportedFormat,
+    FormatNotFound,
+    MalformedPlist,
 };
 
 /// List all format identifiers (UTIs) on the clipboard.
@@ -158,4 +161,68 @@ pub fn writeMultiple(allocator: Allocator, pairs: []const FormatDataPair) !void 
         const success = objc.msgSend(bool, pb, objc.sel("setData:forType:"), .{ nsdata, format_nsstr });
         if (!success) return ClipboardError.WriteFailed;
     }
+}
+
+// ---------------------------------------------------------------------------
+// Path decoding for file-reference formats
+// ---------------------------------------------------------------------------
+
+const paths = @import("../paths.zig");
+
+/// The allowlist of UTIs that `decodePathsForFormat` will accept.
+/// Anything else returns `ClipboardError.UnsupportedFormat`.
+///
+/// `NSFilenamesPboardType` is deprecated by Apple in favor of multiple
+/// `public.file-url` items on the pasteboard, but real-world Finder still
+/// uses it when more than one file is copied, so we support it.
+const file_ref_allowlist = [_][]const u8{
+    "public.file-url",
+    "NSFilenamesPboardType",
+    "public.url",
+};
+
+fn isFileRefFormat(format: []const u8) bool {
+    for (file_ref_allowlist) |allowed| {
+        if (std.mem.eql(u8, format, allowed)) return true;
+    }
+    return false;
+}
+
+/// Decodes a file-reference pasteboard format into one or more POSIX paths.
+///
+/// Returns `ClipboardError.UnsupportedFormat` for any format not in the
+/// allowlist — this check happens BEFORE any pasteboard access, so the error
+/// is deterministic regardless of clipboard state.
+///
+/// Returns `ClipboardError.FormatNotFound` if the format is in the allowlist
+/// but absent from the current pasteboard.
+///
+/// Caller owns the returned outer slice AND each inner path string.
+pub fn decodePathsForFormat(
+    allocator: Allocator,
+    format: []const u8,
+) ![]const []const u8 {
+    // Allowlist gate — before touching the pasteboard.
+    if (!isFileRefFormat(format)) return ClipboardError.UnsupportedFormat;
+
+    // Fetch raw bytes via the existing readFormat.
+    const raw = try readFormat(allocator, format) orelse return ClipboardError.FormatNotFound;
+    defer allocator.free(raw);
+
+    // Dispatch by format.
+    if (std.mem.eql(u8, format, "public.file-url") or std.mem.eql(u8, format, "public.url")) {
+        const path = try paths.decodeFileUrl(allocator, raw);
+        errdefer allocator.free(path);
+
+        const result = try allocator.alloc([]const u8, 1);
+        result[0] = path;
+        return result;
+    }
+
+    // NSFilenamesPboardType — implemented in Task 5.
+    if (std.mem.eql(u8, format, "NSFilenamesPboardType")) {
+        return ClipboardError.MalformedPlist; // placeholder until Task 5
+    }
+
+    unreachable; // allowlist check above guarantees one of the branches matches
 }
