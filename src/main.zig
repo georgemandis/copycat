@@ -80,6 +80,7 @@ fn printUsage(writer: *std.io.Writer) !void {
         \\  (none)                          Show clipboard contents (default)
         \\  list                            List format names, one per line
         \\  read <format> [--out <file>]    Read format data to stdout, or to a file
+        \\                [--as-path [-0]]  Decode file-reference formats to POSIX paths
         \\  write <format> [--data <text>]  Write inline data, or read from stdin
         \\  clear                           Clear the clipboard
         \\  watch [--interval <ms>]         Watch for clipboard changes (default 500ms)
@@ -226,47 +227,135 @@ fn cmdRead(allocator: Allocator, args: []const []const u8) !void {
         const stderr_file = std.fs.File.stderr();
         var errbuf: [4096]u8 = undefined;
         var ew = stderr_file.writer(&errbuf);
-        try ew.interface.print("Usage: clipboard read <format> [--out <file>]\n", .{});
+        try ew.interface.print("Usage: clipboard read <format> [--out <file>] [--as-path [-0]]\n", .{});
         try ew.interface.flush();
         std.process.exit(1);
     }
 
     const format = args[0];
     var out_file: ?[]const u8 = null;
+    var as_path = false;
+    var null_sep = false;
 
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
         if (std.mem.eql(u8, args[i], "--out") and i + 1 < args.len) {
             out_file = args[i + 1];
             i += 1;
+        } else if (std.mem.eql(u8, args[i], "--as-path")) {
+            as_path = true;
+        } else if (std.mem.eql(u8, args[i], "-0") or std.mem.eql(u8, args[i], "--null")) {
+            null_sep = true;
         }
+        // Unknown flags are ignored, matching the existing (lax) behavior.
     }
 
-    const data = try clipboard.readFormat(allocator, format);
-    if (data) |bytes| {
-        defer allocator.free(bytes);
+    // --- Validation (runs BEFORE any pasteboard access) ---
 
-        if (out_file) |path| {
-            const file = try std.fs.cwd().createFile(path, .{});
-            defer file.close();
-            try file.writeAll(bytes);
-            const stderr_file = std.fs.File.stderr();
-            var errbuf: [4096]u8 = undefined;
-            var ew = stderr_file.writer(&errbuf);
-            try ew.interface.print("Wrote {d} bytes to {s}\n", .{ bytes.len, path });
-            try ew.interface.flush();
-        } else {
-            const stdout_file = std.fs.File.stdout();
-            try stdout_file.writeAll(bytes);
-        }
-    } else {
+    if (null_sep and !as_path) {
         const stderr_file = std.fs.File.stderr();
         var errbuf: [4096]u8 = undefined;
         var ew = stderr_file.writer(&errbuf);
-        try ew.interface.print("Format not found: {s}\n", .{format});
+        try ew.interface.print("Error: -0 requires --as-path\n", .{});
         try ew.interface.flush();
         std.process.exit(1);
     }
+
+    if (as_path and !isAllowlistedFileRef(format)) {
+        const stderr_file = std.fs.File.stderr();
+        var errbuf: [4096]u8 = undefined;
+        var ew = stderr_file.writer(&errbuf);
+        try ew.interface.print(
+            "Error: --as-path only supports file-reference formats: public.file-url, NSFilenamesPboardType, public.url\n",
+            .{},
+        );
+        try ew.interface.flush();
+        std.process.exit(1);
+    }
+
+    // --- Dispatch ---
+
+    if (!as_path) {
+        // Existing raw-bytes path — unchanged.
+        const data = try clipboard.readFormat(allocator, format);
+        if (data) |bytes| {
+            defer allocator.free(bytes);
+
+            if (out_file) |path| {
+                const file = try std.fs.cwd().createFile(path, .{});
+                defer file.close();
+                try file.writeAll(bytes);
+                const stderr_file = std.fs.File.stderr();
+                var errbuf: [4096]u8 = undefined;
+                var ew = stderr_file.writer(&errbuf);
+                try ew.interface.print("Wrote {d} bytes to {s}\n", .{ bytes.len, path });
+                try ew.interface.flush();
+            } else {
+                const stdout_file = std.fs.File.stdout();
+                try stdout_file.writeAll(bytes);
+            }
+        } else {
+            const stderr_file = std.fs.File.stderr();
+            var errbuf: [4096]u8 = undefined;
+            var ew = stderr_file.writer(&errbuf);
+            try ew.interface.print("Format not found: {s}\n", .{format});
+            try ew.interface.flush();
+            std.process.exit(1);
+        }
+        return;
+    }
+
+    // --- --as-path path ---
+
+    const paths_result = clipboard.decodePathsForFormat(allocator, format) catch |err| {
+        const stderr_file = std.fs.File.stderr();
+        var errbuf: [4096]u8 = undefined;
+        var ew = stderr_file.writer(&errbuf);
+        switch (err) {
+            error.FormatNotFound => try ew.interface.print("Format not found: {s}\n", .{format}),
+            error.NotFileScheme => try ew.interface.print("Error: {s} is not a file:// URL\n", .{format}),
+            error.MalformedUrl => try ew.interface.print("Error: failed to decode {s}: malformed URL\n", .{format}),
+            error.InvalidPercentEncoding => try ew.interface.print("Error: failed to decode {s}: invalid percent-encoding\n", .{format}),
+            error.MalformedPlist => try ew.interface.print("Error: failed to decode {s}: malformed plist\n", .{format}),
+            else => try ew.interface.print("Error: failed to decode {s}: {s}\n", .{ format, @errorName(err) }),
+        }
+        try ew.interface.flush();
+        std.process.exit(1);
+    };
+    defer {
+        for (paths_result) |p| allocator.free(p);
+        allocator.free(paths_result);
+    }
+
+    const terminator: u8 = if (null_sep) 0 else '\n';
+
+    if (out_file) |path| {
+        const file = try std.fs.cwd().createFile(path, .{});
+        defer file.close();
+        for (paths_result) |p| {
+            try file.writeAll(p);
+            try file.writeAll(&[_]u8{terminator});
+        }
+    } else {
+        const stdout_file = std.fs.File.stdout();
+        for (paths_result) |p| {
+            try stdout_file.writeAll(p);
+            try stdout_file.writeAll(&[_]u8{terminator});
+        }
+    }
+}
+
+/// Duplicated from platform/macos.zig on purpose: main.zig is the CLI layer
+/// and needs to reject unsupported formats BEFORE calling into the clipboard
+/// API, so the error message is emitted from the CLI and not surfaced via
+/// the generic `UnsupportedFormat` error code. The list is small and tightly
+/// coupled to the spec; if it diverges, a single test will catch it.
+fn isAllowlistedFileRef(format: []const u8) bool {
+    const allowed = [_][]const u8{ "public.file-url", "NSFilenamesPboardType", "public.url" };
+    for (allowed) |a| {
+        if (std.mem.eql(u8, format, a)) return true;
+    }
+    return false;
 }
 
 fn cmdWrite(allocator: Allocator, args: []const []const u8) !void {
