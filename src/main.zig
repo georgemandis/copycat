@@ -317,6 +317,18 @@ fn cmdRead(allocator: Allocator, args: []const []const u8) !void {
             error.MalformedUrl => try ew.interface.print("Error: failed to decode {s}: malformed URL\n", .{format}),
             error.InvalidPercentEncoding => try ew.interface.print("Error: failed to decode {s}: invalid percent-encoding\n", .{format}),
             error.MalformedPlist => try ew.interface.print("Error: failed to decode {s}: malformed plist\n", .{format}),
+            // Defense in depth: if isAllowlistedFileRef ever drifts from
+            // file_ref_allowlist in platform/macos.zig, this arm ensures the
+            // user still sees the spec-mandated allowlist message instead of
+            // a raw "UnsupportedFormat" error name.
+            error.UnsupportedFormat => try ew.interface.print(
+                "Error: --as-path only supports file-reference formats: public.file-url, NSFilenamesPboardType, public.url\n",
+                .{},
+            ),
+            error.PasteboardUnavailable => try ew.interface.print(
+                "Error: clipboard is unavailable (no pasteboard in this context)\n",
+                .{},
+            ),
             else => try ew.interface.print("Error: failed to decode {s}: {s}\n", .{ format, @errorName(err) }),
         }
         try ew.interface.flush();
