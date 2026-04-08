@@ -52,6 +52,12 @@ test "percentDecode passes through plain ASCII unchanged" {
     try std.testing.expectEqualStrings("hello world", result);
 }
 
+test "percentDecode handles empty input" {
+    const result = try percentDecode(std.testing.allocator, "");
+    defer std.testing.allocator.free(result);
+    try std.testing.expectEqualStrings("", result);
+}
+
 test "percentDecode decodes %20 to space" {
     const result = try percentDecode(std.testing.allocator, "a%20b");
     defer std.testing.allocator.free(result);
