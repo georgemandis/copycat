@@ -33,3 +33,13 @@ pub fn clear() !void {
 pub fn getChangeCount() i64 {
     return platform.getChangeCount();
 }
+
+/// Decodes a file-reference pasteboard format (e.g. `public.file-url`,
+/// `NSFilenamesPboardType`, `public.url` with file:// scheme) into one or
+/// more POSIX paths. Caller owns the outer slice AND each inner path string.
+pub fn decodePathsForFormat(
+    allocator: Allocator,
+    format: []const u8,
+) ![]const []const u8 {
+    return platform.decodePathsForFormat(allocator, format);
+}
