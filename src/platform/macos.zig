@@ -219,10 +219,75 @@ pub fn decodePathsForFormat(
         return result;
     }
 
-    // NSFilenamesPboardType — implemented in Task 5.
     if (std.mem.eql(u8, format, "NSFilenamesPboardType")) {
-        return ClipboardError.MalformedPlist; // placeholder until Task 5
+        return try decodeFilenamesPlist(allocator, raw);
     }
 
     unreachable; // allowlist check above guarantees one of the branches matches
+}
+
+/// Parse an `NSFilenamesPboardType` binary plist (bytes from the pasteboard)
+/// and return an allocator-owned slice of allocator-owned POSIX path strings.
+///
+/// Uses `NSPropertyListSerialization propertyListWithData:options:format:error:`
+/// from Foundation, which handles both binary and XML plist formats.
+fn decodeFilenamesPlist(allocator: Allocator, bytes: []const u8) ![]const []const u8 {
+    // Wrap the bytes in an NSData (autoreleased).
+    const nsdata = if (bytes.len == 0)
+        objc.nsDataEmpty()
+    else
+        objc.nsDataFromBytes(bytes.ptr, bytes.len);
+
+    // Call [NSPropertyListSerialization propertyListWithData:options:format:error:]
+    // Signature: + (id)propertyListWithData:(NSData *)data
+    //                              options:(NSPropertyListReadOptions)opt
+    //                               format:(NSPropertyListFormat *)format
+    //                                error:(out NSError **)error;
+    //
+    // We pass 0 for options (NSPropertyListImmutable), and null for both
+    // out-pointers — we don't care which plist format it was, and if it fails
+    // we just need to know the call returned nil.
+    const NSPropertyListSerialization = objc.getClass("NSPropertyListSerialization") orelse return ClipboardError.MalformedPlist;
+
+    const plist: ?objc.id = objc.msgSend(
+        ?objc.id,
+        NSPropertyListSerialization,
+        objc.sel("propertyListWithData:options:format:error:"),
+        .{ nsdata, @as(objc.NSUInteger, 0), @as(?*anyopaque, null), @as(?*anyopaque, null) },
+    );
+    const plist_id = plist orelse return ClipboardError.MalformedPlist;
+
+    // Must be an NSArray.
+    const NSArray = objc.getClass("NSArray") orelse return ClipboardError.MalformedPlist;
+    const is_array = objc.msgSend(bool, plist_id, objc.sel("isKindOfClass:"), .{NSArray});
+    if (!is_array) return ClipboardError.MalformedPlist;
+
+    const count = objc.nsArrayCount(plist_id);
+    var result = try allocator.alloc([]const u8, count);
+    errdefer allocator.free(result);
+
+    // Track how many inner strings we've successfully allocated, so a later
+    // allocation failure can free only the ones we own. Zig runs errdefers
+    // in reverse order, so on error this fires BEFORE `allocator.free(result)`
+    // above — inner strings freed first, then the outer slice.
+    var filled: usize = 0;
+    errdefer {
+        for (result[0..filled]) |s| allocator.free(s);
+    }
+
+    const NSString = objc.getClass("NSString") orelse return ClipboardError.MalformedPlist;
+    for (0..count) |i| {
+        const elem = objc.nsArrayObjectAtIndex(plist_id, i);
+        const is_str = objc.msgSend(bool, elem, objc.sel("isKindOfClass:"), .{NSString});
+        if (!is_str) return ClipboardError.MalformedPlist;
+
+        const cstr = objc.fromNSString(elem) orelse return ClipboardError.MalformedPlist;
+        const len = std.mem.len(cstr);
+        const copy = try allocator.alloc(u8, len);
+        @memcpy(copy, cstr[0..len]);
+        result[filled] = copy;
+        filled += 1;
+    }
+
+    return result;
 }

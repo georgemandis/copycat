@@ -43,6 +43,7 @@ fn MsgSendFnType(comptime ReturnType: type, comptime ArgTypes: type) type {
         1 => *const fn (id, SEL, fields[0].type) callconv(.c) ReturnType,
         2 => *const fn (id, SEL, fields[0].type, fields[1].type) callconv(.c) ReturnType,
         3 => *const fn (id, SEL, fields[0].type, fields[1].type, fields[2].type) callconv(.c) ReturnType,
+        4 => *const fn (id, SEL, fields[0].type, fields[1].type, fields[2].type, fields[3].type) callconv(.c) ReturnType,
         else => @compileError("msgSendFn: too many arguments, add more cases"),
     };
 }
@@ -64,6 +65,7 @@ pub fn msgSend(comptime ReturnType: type, target: anytype, selector: SEL, args: 
         1 => func(target_as_id, selector, args[0]),
         2 => func(target_as_id, selector, args[0], args[1]),
         3 => func(target_as_id, selector, args[0], args[1], args[2]),
+        4 => func(target_as_id, selector, args[0], args[1], args[2], args[3]),
         else => @compileError("msgSend: too many arguments"),
     };
 }
