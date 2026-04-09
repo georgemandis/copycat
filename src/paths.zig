@@ -74,6 +74,50 @@ pub fn decodeFileUrl(allocator: Allocator, url_bytes: []const u8) DecodePathErro
     return try percentDecode(allocator, after_prefix);
 }
 
+/// Parses a text/uri-list blob (RFC 2483) into POSIX paths.
+///
+/// Steps:
+///   1. Split the input on CRLF or LF (tolerant of both).
+///   2. Skip blank lines and comment lines (lines starting with '#').
+///   3. For each remaining line, delegate to decodeFileUrl.
+///   4. If decodeFileUrl returns NotFileScheme, propagate the error —
+///      non-file URIs are not supported by this library.
+///
+/// Caller owns the outer slice AND each inner path string.
+pub fn decodeUriList(
+    allocator: Allocator,
+    bytes: []const u8,
+) DecodePathError![]const []const u8 {
+    var out = try std.array_list.Managed([]const u8).initCapacity(allocator, 0);
+    errdefer {
+        for (out.items) |p| allocator.free(p);
+        out.deinit();
+    }
+
+    var start: usize = 0;
+    var i: usize = 0;
+    while (i <= bytes.len) : (i += 1) {
+        const at_eol = i == bytes.len or bytes[i] == '\n';
+        if (!at_eol) continue;
+
+        // Extract the line, stripping a trailing \r if present (CRLF tolerance).
+        var line_end = i;
+        if (line_end > start and bytes[line_end - 1] == '\r') line_end -= 1;
+        const line = bytes[start..line_end];
+        start = i + 1;
+
+        // Skip blanks and comments.
+        if (line.len == 0) continue;
+        if (line[0] == '#') continue;
+
+        const decoded = try decodeFileUrl(allocator, line);
+        errdefer allocator.free(decoded);
+        try out.append(decoded);
+    }
+
+    return try out.toOwnedSlice();
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -185,5 +229,164 @@ test "decodeFileUrl rejects file:// with empty path" {
     try std.testing.expectError(
         DecodePathError.MalformedUrl,
         decodeFileUrl(std.testing.allocator, "file://"),
+    );
+}
+
+test "decodeUriList single file LF" {
+    const input = "file:///tmp/foo\n";
+    const result = try decodeUriList(std.testing.allocator, input);
+    defer {
+        for (result) |p| std.testing.allocator.free(p);
+        std.testing.allocator.free(result);
+    }
+    try std.testing.expectEqual(@as(usize, 1), result.len);
+    try std.testing.expectEqualStrings("/tmp/foo", result[0]);
+}
+
+test "decodeUriList single file CRLF" {
+    const input = "file:///tmp/foo\r\n";
+    const result = try decodeUriList(std.testing.allocator, input);
+    defer {
+        for (result) |p| std.testing.allocator.free(p);
+        std.testing.allocator.free(result);
+    }
+    try std.testing.expectEqual(@as(usize, 1), result.len);
+    try std.testing.expectEqualStrings("/tmp/foo", result[0]);
+}
+
+test "decodeUriList single file no trailing newline" {
+    const input = "file:///tmp/foo";
+    const result = try decodeUriList(std.testing.allocator, input);
+    defer {
+        for (result) |p| std.testing.allocator.free(p);
+        std.testing.allocator.free(result);
+    }
+    try std.testing.expectEqual(@as(usize, 1), result.len);
+    try std.testing.expectEqualStrings("/tmp/foo", result[0]);
+}
+
+test "decodeUriList multiple files LF" {
+    const input = "file:///tmp/a\nfile:///tmp/b\nfile:///tmp/c\n";
+    const result = try decodeUriList(std.testing.allocator, input);
+    defer {
+        for (result) |p| std.testing.allocator.free(p);
+        std.testing.allocator.free(result);
+    }
+    try std.testing.expectEqual(@as(usize, 3), result.len);
+    try std.testing.expectEqualStrings("/tmp/a", result[0]);
+    try std.testing.expectEqualStrings("/tmp/b", result[1]);
+    try std.testing.expectEqualStrings("/tmp/c", result[2]);
+}
+
+test "decodeUriList multiple files CRLF" {
+    const input = "file:///tmp/a\r\nfile:///tmp/b\r\n";
+    const result = try decodeUriList(std.testing.allocator, input);
+    defer {
+        for (result) |p| std.testing.allocator.free(p);
+        std.testing.allocator.free(result);
+    }
+    try std.testing.expectEqual(@as(usize, 2), result.len);
+    try std.testing.expectEqualStrings("/tmp/a", result[0]);
+    try std.testing.expectEqualStrings("/tmp/b", result[1]);
+}
+
+test "decodeUriList mixed LF and CRLF" {
+    const input = "file:///tmp/a\nfile:///tmp/b\r\nfile:///tmp/c\n";
+    const result = try decodeUriList(std.testing.allocator, input);
+    defer {
+        for (result) |p| std.testing.allocator.free(p);
+        std.testing.allocator.free(result);
+    }
+    try std.testing.expectEqual(@as(usize, 3), result.len);
+    try std.testing.expectEqualStrings("/tmp/a", result[0]);
+    try std.testing.expectEqualStrings("/tmp/b", result[1]);
+    try std.testing.expectEqualStrings("/tmp/c", result[2]);
+}
+
+test "decodeUriList skips comment lines" {
+    const input = "# this is a comment\nfile:///tmp/a\n# another comment\nfile:///tmp/b\n";
+    const result = try decodeUriList(std.testing.allocator, input);
+    defer {
+        for (result) |p| std.testing.allocator.free(p);
+        std.testing.allocator.free(result);
+    }
+    try std.testing.expectEqual(@as(usize, 2), result.len);
+    try std.testing.expectEqualStrings("/tmp/a", result[0]);
+    try std.testing.expectEqualStrings("/tmp/b", result[1]);
+}
+
+test "decodeUriList skips blank lines" {
+    const input = "\nfile:///tmp/a\n\n\nfile:///tmp/b\n\n";
+    const result = try decodeUriList(std.testing.allocator, input);
+    defer {
+        for (result) |p| std.testing.allocator.free(p);
+        std.testing.allocator.free(result);
+    }
+    try std.testing.expectEqual(@as(usize, 2), result.len);
+    try std.testing.expectEqualStrings("/tmp/a", result[0]);
+    try std.testing.expectEqualStrings("/tmp/b", result[1]);
+}
+
+test "decodeUriList percent-encoded spaces" {
+    const input = "file:///tmp/My%20Docs/foo.txt\n";
+    const result = try decodeUriList(std.testing.allocator, input);
+    defer {
+        for (result) |p| std.testing.allocator.free(p);
+        std.testing.allocator.free(result);
+    }
+    try std.testing.expectEqual(@as(usize, 1), result.len);
+    try std.testing.expectEqualStrings("/tmp/My Docs/foo.txt", result[0]);
+}
+
+test "decodeUriList UTF-8 percent-encoded" {
+    // %E2%98%83 is a snowman
+    const input = "file:///tmp/%E2%98%83.txt\n";
+    const result = try decodeUriList(std.testing.allocator, input);
+    defer {
+        for (result) |p| std.testing.allocator.free(p);
+        std.testing.allocator.free(result);
+    }
+    try std.testing.expectEqual(@as(usize, 1), result.len);
+    try std.testing.expectEqualStrings("/tmp/\xE2\x98\x83.txt", result[0]);
+}
+
+test "decodeUriList empty input" {
+    const result = try decodeUriList(std.testing.allocator, "");
+    defer std.testing.allocator.free(result);
+    try std.testing.expectEqual(@as(usize, 0), result.len);
+}
+
+test "decodeUriList only comments and blanks" {
+    const input = "# hello\n\n# world\n\n";
+    const result = try decodeUriList(std.testing.allocator, input);
+    defer std.testing.allocator.free(result);
+    try std.testing.expectEqual(@as(usize, 0), result.len);
+}
+
+test "decodeUriList rejects http scheme" {
+    try std.testing.expectError(
+        DecodePathError.NotFileScheme,
+        decodeUriList(std.testing.allocator, "http://example.com/\n"),
+    );
+}
+
+test "decodeUriList rejects mixed file and non-file" {
+    try std.testing.expectError(
+        DecodePathError.NotFileScheme,
+        decodeUriList(std.testing.allocator, "file:///tmp/a\nhttps://b/\n"),
+    );
+}
+
+test "decodeUriList rejects missing scheme" {
+    try std.testing.expectError(
+        DecodePathError.NotFileScheme,
+        decodeUriList(std.testing.allocator, "/plain/path\n"),
+    );
+}
+
+test "decodeUriList rejects invalid percent encoding" {
+    try std.testing.expectError(
+        DecodePathError.InvalidPercentEncoding,
+        decodeUriList(std.testing.allocator, "file:///tmp/bad%ZZ\n"),
     );
 }
