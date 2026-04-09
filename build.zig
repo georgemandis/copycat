@@ -3,6 +3,7 @@ const std = @import("std");
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const target_os = target.result.os.tag;
 
     // Shared module for clipboard core logic
     const clipboard_mod = b.createModule(.{
@@ -10,8 +11,37 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    clipboard_mod.linkSystemLibrary("objc", .{});
-    clipboard_mod.linkFramework("AppKit", .{});
+
+    switch (target_os) {
+        .macos => {
+            clipboard_mod.linkSystemLibrary("objc", .{});
+            clipboard_mod.linkFramework("AppKit", .{});
+        },
+        .linux => {
+            clipboard_mod.linkSystemLibrary("X11", .{});
+            clipboard_mod.linkSystemLibrary("wayland-client", .{});
+
+            // Generate the wlr-data-control client header and private code
+            // from the vendored XML via wayland-scanner (which is required
+            // to be on PATH on Linux builds; it ships in the libwayland-bin
+            // package on Debian/Ubuntu).
+            const wl_scanner_header = b.addSystemCommand(&.{ "wayland-scanner", "client-header" });
+            wl_scanner_header.addFileArg(b.path("vendor/wayland-protocols/wlr-data-control-unstable-v1.xml"));
+            const wl_header = wl_scanner_header.addOutputFileArg("wlr-data-control-unstable-v1-client-protocol.h");
+
+            const wl_scanner_code = b.addSystemCommand(&.{ "wayland-scanner", "private-code" });
+            wl_scanner_code.addFileArg(b.path("vendor/wayland-protocols/wlr-data-control-unstable-v1.xml"));
+            const wl_code = wl_scanner_code.addOutputFileArg("wlr-data-control-unstable-v1-protocol.c");
+
+            clipboard_mod.addCSourceFile(.{ .file = wl_code, .flags = &.{} });
+            clipboard_mod.addIncludePath(wl_header.dirname());
+        },
+        else => {
+            // Other platforms are not supported by the library yet; the
+            // clipboard.zig @compileError still enforces that at the Zig
+            // level. build.zig stays silent so `zig build --help` still works.
+        },
+    }
 
     // Shared library (C ABI for Bun FFI)
     const lib = b.addLibrary(.{
@@ -56,10 +86,8 @@ pub fn build(b: *std.Build) void {
     // Unit tests for pure Zig modules (no OS dependencies).
     // Run with: `zig build test`
     //
-    // Only modules that are safe to compile without linking Foundation
-    // belong here. `paths.zig` is pure Zig; other modules that call into
-    // Obj-C should NOT be added to this step unless they also link the
-    // appropriate system libraries.
+    // Only paths.zig is in this step. platform/* files link to platform
+    // libraries that are not present in the pure-Zig test binary.
     // -------------------------------------------------------------------
     const paths_tests = b.addTest(.{
         .root_module = b.createModule(.{
