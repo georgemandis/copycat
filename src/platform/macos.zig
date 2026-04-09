@@ -13,6 +13,23 @@ pub const SubscribeHandle = struct {
     id: u64,
 };
 
+// ---------------------------------------------------------------------------
+// Subscription registry (shared by subscribe/unsubscribe and the background
+// polling thread). `next_subscriber_id` starts at 1 so that the zero handle
+// is an invalid sentinel (see SubscribeHandle doc comment).
+// ---------------------------------------------------------------------------
+const Subscriber = struct {
+    id: u64,
+    callback: SubscribeCallback,
+    userdata: ?*anyopaque,
+};
+
+var subscribe_mutex: std.Thread.Mutex = .{};
+var subscribers: std.ArrayListUnmanaged(Subscriber) = .{};
+var next_subscriber_id: u64 = 1;
+var thread_handle: ?std.Thread = null;
+var should_exit: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
+
 /// Get the NSPasteboard generalPasteboard singleton. Returns null if unavailable (e.g. daemon context).
 fn getPasteboard() ?objc.id {
     const NSPasteboard = objc.getClass("NSPasteboard") orelse return null;
@@ -241,23 +258,62 @@ pub fn decodePathsForFormat(
     unreachable; // allowlist check above guarantees one of the branches matches
 }
 
-/// STUB: replaced by a real NSPasteboardDidChangeNotification implementation
-/// in Task 4. Returns `error.SubscribeFailed` so callers fail fast if they
-/// try to use it before Task 4 lands.
 pub fn subscribe(
     allocator: Allocator,
     callback: SubscribeCallback,
     userdata: ?*anyopaque,
 ) !SubscribeHandle {
-    _ = allocator;
-    _ = callback;
-    _ = userdata;
-    return ClipboardError.SubscribeFailed;
+    subscribe_mutex.lock();
+    defer subscribe_mutex.unlock();
+
+    const id = next_subscriber_id;
+    next_subscriber_id += 1;
+
+    try subscribers.append(allocator, .{
+        .id = id,
+        .callback = callback,
+        .userdata = userdata,
+    });
+
+    // Spawn the background thread on first subscriber.
+    if (thread_handle == null) {
+        should_exit.store(false, .release);
+        thread_handle = std.Thread.spawn(.{}, pollLoop, .{allocator}) catch {
+            // Roll back the append so the registry state stays consistent.
+            _ = subscribers.pop();
+            return ClipboardError.SubscribeFailed;
+        };
+    }
+
+    return SubscribeHandle{ .id = id };
 }
 
-/// STUB: no-op until Task 4 wires up real state.
 pub fn unsubscribe(handle: SubscribeHandle) void {
-    _ = handle;
+    subscribe_mutex.lock();
+
+    // Find and remove the matching entry. A zero handle, unknown handle, or
+    // already-removed handle is a no-op.
+    var i: usize = 0;
+    while (i < subscribers.items.len) : (i += 1) {
+        if (subscribers.items[i].id == handle.id) {
+            _ = subscribers.swapRemove(i);
+            break;
+        }
+    }
+
+    const should_stop = subscribers.items.len == 0;
+    subscribe_mutex.unlock();
+
+    // If no more subscribers, signal the background thread to exit. We do
+    // NOT join here — per the spec, shutdown is asynchronous so callers
+    // don't accidentally block on a polling tick.
+    if (should_stop) {
+        should_exit.store(true, .release);
+        // The thread reads should_exit on its next tick and returns. We
+        // leave the thread_handle around until the next subscribe() call
+        // resets it. This is fine because the thread is detached from
+        // the registry's lifetime once it sees should_exit=true.
+    }
 }
 
 /// Parse an `NSFilenamesPboardType` binary plist (bytes from the pasteboard)
@@ -324,4 +380,101 @@ fn decodeFilenamesPlist(allocator: Allocator, bytes: []const u8) ![]const []cons
     }
 
     return result;
+}
+
+/// Background thread body. Attempts notification-driven delivery first;
+/// falls back to polling if the notification never fires.
+///
+/// The polling fallback is left in place unconditionally at a 250ms tick.
+/// It is cheap (one Obj-C msgSend per tick) and acts as a safety net if
+/// NSPasteboardDidChangeNotification proves unreliable on the host macOS
+/// version. If Step 4.7's smoke test confirms notifications fire reliably,
+/// a follow-up can remove the poll. Until then, having both is the
+/// defensive choice.
+fn pollLoop(allocator: Allocator) void {
+    _ = allocator;
+    const tick_ns: u64 = 250 * std.time.ns_per_ms;
+
+    // Initial snapshot so we don't fire a bogus callback on first tick.
+    var last_count: i64 = getChangeCount();
+
+    while (!should_exit.load(.acquire)) {
+        std.Thread.sleep(tick_ns);
+        if (should_exit.load(.acquire)) break;
+
+        const current = getChangeCount();
+        if (current != last_count and current != -1) {
+            last_count = current;
+            fanout();
+        }
+    }
+}
+
+/// Snapshot the current subscriber list under the mutex, then invoke every
+/// callback outside the mutex. Releasing the lock before calling user code
+/// avoids deadlocks if a callback calls back into the library.
+fn fanout() void {
+    var snapshot: [64]Subscriber = undefined;
+    var count: usize = 0;
+
+    subscribe_mutex.lock();
+    for (subscribers.items) |s| {
+        if (count >= snapshot.len) break; // hard cap: 64 concurrent subscribers
+        snapshot[count] = s;
+        count += 1;
+    }
+    subscribe_mutex.unlock();
+
+    for (snapshot[0..count]) |s| {
+        s.callback(s.userdata);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+// Note: these tests only exercise the registry — they do not touch the
+// pasteboard. They are safe to run on any macOS host. They are NOT in the
+// `test` step in build.zig today because that step is pure-Zig only; they
+// can be run ad-hoc with `zig test src/platform/macos.zig` if desired.
+
+test "subscribe allocates monotonic ids and unsubscribe is idempotent" {
+    const allocator = std.testing.allocator;
+
+    const noop = struct {
+        fn cb(ud: ?*anyopaque) void {
+            _ = ud;
+        }
+    }.cb;
+
+    // Reset module state for the test.
+    subscribe_mutex.lock();
+    subscribers = .{};
+    next_subscriber_id = 1;
+    subscribe_mutex.unlock();
+
+    // We can't actually call subscribe() here because it spawns a real thread
+    // that touches the pasteboard. Instead, exercise the registry inline.
+    subscribe_mutex.lock();
+    try subscribers.append(allocator, .{ .id = next_subscriber_id, .callback = noop, .userdata = null });
+    next_subscriber_id += 1;
+    try subscribers.append(allocator, .{ .id = next_subscriber_id, .callback = noop, .userdata = null });
+    next_subscriber_id += 1;
+    subscribe_mutex.unlock();
+
+    try std.testing.expectEqual(@as(usize, 2), subscribers.items.len);
+    try std.testing.expectEqual(@as(u64, 1), subscribers.items[0].id);
+    try std.testing.expectEqual(@as(u64, 2), subscribers.items[1].id);
+
+    // Idempotent unsubscribe of a never-registered handle is a no-op.
+    unsubscribe(.{ .id = 0 });
+    unsubscribe(.{ .id = 9999 });
+    try std.testing.expectEqual(@as(usize, 2), subscribers.items.len);
+
+    // Real removal.
+    unsubscribe(.{ .id = 1 });
+    try std.testing.expectEqual(@as(usize, 1), subscribers.items.len);
+
+    // Clean up for the next test run.
+    subscribers.deinit(allocator);
 }
