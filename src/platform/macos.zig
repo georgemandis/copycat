@@ -266,6 +266,32 @@ pub fn subscribe(
     subscribe_mutex.lock();
     defer subscribe_mutex.unlock();
 
+    // If a prior teardown left a dead (or soon-to-be-dead) thread handle
+    // behind, join it before reusing the slot. This handles the
+    // subscribe -> unsubscribe -> subscribe resurrection case. Without this,
+    // a second subscribe after teardown would skip the spawn and leave the
+    // new subscriber with no polling thread.
+    //
+    // The condition `subscribers.items.len == 0 and should_exit.load(.acquire)`
+    // identifies "we are in teardown mode" unambiguously:
+    // - `subscribers.items.len == 0`: the list was emptied by the last unsubscribe.
+    //   If the list is non-empty, a thread is polling correctly; don't touch it.
+    // - `should_exit == true`: because unsubscribe now stores should_exit while
+    //   holding the mutex, any subscribe that acquires the mutex after an
+    //   emptying unsubscribe will see the flag set.
+    //
+    // We temporarily release the mutex around the join so fanout()'s brief
+    // critical section can complete, then re-acquire. The defer at the top
+    // still fires exactly once at return (we end in the locked state).
+    if (thread_handle) |old_thread| {
+        if (subscribers.items.len == 0 and should_exit.load(.acquire)) {
+            subscribe_mutex.unlock();
+            old_thread.join();
+            subscribe_mutex.lock();
+            thread_handle = null;
+        }
+    }
+
     const id = next_subscriber_id;
     next_subscriber_id += 1;
 
@@ -275,12 +301,14 @@ pub fn subscribe(
         .userdata = userdata,
     });
 
-    // Spawn the background thread on first subscriber.
+    // Spawn the background thread on first subscriber (or after a teardown).
     if (thread_handle == null) {
         should_exit.store(false, .release);
         thread_handle = std.Thread.spawn(.{}, pollLoop, .{allocator}) catch {
-            // Roll back the append so the registry state stays consistent.
+            // Roll back both the append and the id increment so the registry
+            // state stays consistent.
             _ = subscribers.pop();
+            next_subscriber_id -= 1;
             return ClipboardError.SubscribeFailed;
         };
     }
@@ -290,6 +318,7 @@ pub fn subscribe(
 
 pub fn unsubscribe(handle: SubscribeHandle) void {
     subscribe_mutex.lock();
+    defer subscribe_mutex.unlock();
 
     // Find and remove the matching entry. A zero handle, unknown handle, or
     // already-removed handle is a no-op.
@@ -301,18 +330,13 @@ pub fn unsubscribe(handle: SubscribeHandle) void {
         }
     }
 
-    const should_stop = subscribers.items.len == 0;
-    subscribe_mutex.unlock();
-
-    // If no more subscribers, signal the background thread to exit. We do
-    // NOT join here — per the spec, shutdown is asynchronous so callers
-    // don't accidentally block on a polling tick.
-    if (should_stop) {
+    // Signal the background thread to exit if the list is now empty. The
+    // store happens under the mutex so a racing subscribe() will see the flag
+    // and join the stale thread before re-spawning (closing the resurrection
+    // race). We do NOT join here — shutdown is asynchronous per the spec;
+    // the next subscribe() is responsible for joining the stale handle.
+    if (subscribers.items.len == 0) {
         should_exit.store(true, .release);
-        // The thread reads should_exit on its next tick and returns. We
-        // leave the thread_handle around until the next subscribe() call
-        // resets it. This is fine because the thread is detached from
-        // the registry's lifetime once it sees should_exit=true.
     }
 }
 
@@ -382,15 +406,16 @@ fn decodeFilenamesPlist(allocator: Allocator, bytes: []const u8) ![]const []cons
     return result;
 }
 
-/// Background thread body. Attempts notification-driven delivery first;
-/// falls back to polling if the notification never fires.
+/// Background thread body. Polls `getChangeCount` at a 250ms tick and
+/// fires fanout whenever the count changes.
 ///
-/// The polling fallback is left in place unconditionally at a 250ms tick.
-/// It is cheap (one Obj-C msgSend per tick) and acts as a safety net if
-/// NSPasteboardDidChangeNotification proves unreliable on the host macOS
-/// version. If Step 4.7's smoke test confirms notifications fire reliably,
-/// a follow-up can remove the poll. Until then, having both is the
-/// defensive choice.
+/// A previous plan revision considered wiring up NSPasteboardDidChangeNotification
+/// for event-driven delivery, but extending the objc.zig bridge with
+/// NSNotificationCenter + CFRunLoop helpers was out of scope for this task.
+/// Polling at 250ms is cheap (one Obj-C msgSend per tick) and matches the
+/// Linux/X11 backend's polling cadence, so the two platforms share semantics.
+/// A follow-up can swap in a notification-driven variant without touching
+/// the subscriber registry, fanout, or the public API.
 fn pollLoop(allocator: Allocator) void {
     _ = allocator;
     const tick_ns: u64 = 250 * std.time.ns_per_ms;
@@ -451,6 +476,8 @@ test "subscribe allocates monotonic ids and unsubscribe is idempotent" {
     subscribe_mutex.lock();
     subscribers = .{};
     next_subscriber_id = 1;
+    thread_handle = null;
+    should_exit.store(false, .release);
     subscribe_mutex.unlock();
 
     // We can't actually call subscribe() here because it spawns a real thread

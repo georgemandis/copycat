@@ -53,9 +53,14 @@ pub fn decodePathsForFormat(
 /// with respect to any state it touches.
 ///
 /// Platform notes:
-///   - macOS: event-driven via NSPasteboardDidChangeNotification.
+///   - macOS: 250ms polling on NSPasteboard.changeCount (event-driven variant TBD).
 ///   - Linux/Wayland: event-driven via zwlr_data_control selection events.
 ///   - Linux/X11: polling-based (500ms default, tunable via LINUX_X11_POLL_MS).
+///
+/// Implementation note: the current macOS and Linux backends support up to 64
+/// concurrent subscribers; additional subscribers beyond that are silently
+/// dropped during fanout. Lift the cap in the respective backends if you hit
+/// this limit.
 pub fn subscribe(
     allocator: Allocator,
     callback: SubscribeCallback,
