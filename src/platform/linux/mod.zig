@@ -1,5 +1,6 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const paths = @import("../../paths.zig");
 
 pub const ClipboardError = error{
     PasteboardUnavailable,
@@ -65,7 +66,7 @@ pub fn getChangeCount() i64 {
 pub fn decodePathsForFormat(
     allocator: Allocator,
     format: []const u8,
-) ![]const []const u8 {
+) (ClipboardError || paths.DecodePathError || Allocator.Error)![]const []const u8 {
     _ = allocator;
     _ = format;
     return ClipboardError.NoDisplayServer;

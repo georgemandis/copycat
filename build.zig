@@ -18,6 +18,7 @@ pub fn build(b: *std.Build) void {
             clipboard_mod.linkFramework("AppKit", .{});
         },
         .linux => {
+            clipboard_mod.link_libc = true;
             clipboard_mod.linkSystemLibrary("X11", .{});
             clipboard_mod.linkSystemLibrary("wayland-client", .{});
 
