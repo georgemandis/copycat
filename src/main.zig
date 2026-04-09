@@ -83,7 +83,7 @@ fn printUsage(writer: *std.io.Writer) !void {
         \\                [--as-path [-0]]  Decode file-reference formats to POSIX paths
         \\  write <format> [--data <text>]  Write inline data, or read from stdin
         \\  clear                           Clear the clipboard
-        \\  watch [--interval <ms>]         Watch for clipboard changes (default 500ms)
+        \\  watch                           Watch for clipboard changes (event-driven)
         \\  help                            Show this help message
         \\
         \\Global flags:
@@ -378,35 +378,57 @@ fn cmdClear() !void {
 }
 
 fn cmdWatch(allocator: Allocator, args: []const []const u8, json_output: bool) !void {
-    var interval_ms: u64 = 500;
-
-    var i: usize = 0;
-    while (i < args.len) : (i += 1) {
-        if (std.mem.eql(u8, args[i], "--interval") and i + 1 < args.len) {
-            interval_ms = std.fmt.parseInt(u64, args[i + 1], 10) catch 500;
-            i += 1;
-        }
-    }
+    _ = args; // --interval is no longer accepted; unknown args are ignored.
 
     const stderr_file = std.fs.File.stderr();
     var stderr_buf: [4096]u8 = undefined;
     var stderr_w = stderr_file.writer(&stderr_buf);
-    try stderr_w.interface.print("Watching clipboard (interval: {d}ms, Ctrl+C to stop)...\n\n", .{interval_ms});
+    try stderr_w.interface.print("Watching clipboard (Ctrl+C to stop)...\n\n", .{});
     try stderr_w.interface.flush();
 
-    var last_count = clipboard.getChangeCount();
+    var context = WatchContext{
+        .allocator = allocator,
+        .json_output = json_output,
+        .mutex = .{},
+        .condition = .{},
+        .pending = false,
+    };
 
+    const handle = try clipboard.subscribe(allocator, WatchContext.onChange, &context);
+    defer clipboard.unsubscribe(handle);
+
+    // Main loop: wait for the callback to signal, introspect, loop until SIGINT.
+    // SIGINT handling relies on process termination — see spec's cmdWatch section.
     while (true) {
-        std.Thread.sleep(interval_ms * std.time.ns_per_ms);
-        const current_count = clipboard.getChangeCount();
-        if (current_count != last_count) {
-            last_count = current_count;
-            try introspect(allocator, json_output);
-            const stdout_file = std.fs.File.stdout();
-            var stdout_buf: [4096]u8 = undefined;
-            var stdout_w = stdout_file.writer(&stdout_buf);
-            try stdout_w.interface.print("---\n\n", .{});
-            try stdout_w.interface.flush();
+        context.mutex.lock();
+        while (!context.pending) {
+            context.condition.wait(&context.mutex);
         }
+        context.pending = false;
+        context.mutex.unlock();
+
+        try introspect(allocator, json_output);
+
+        const stdout_file = std.fs.File.stdout();
+        var stdout_buf: [4096]u8 = undefined;
+        var stdout_w = stdout_file.writer(&stdout_buf);
+        try stdout_w.interface.print("---\n\n", .{});
+        try stdout_w.interface.flush();
     }
 }
+
+const WatchContext = struct {
+    allocator: Allocator,
+    json_output: bool,
+    mutex: std.Thread.Mutex,
+    condition: std.Thread.Condition,
+    pending: bool,
+
+    fn onChange(userdata: ?*anyopaque) void {
+        const ctx: *WatchContext = @ptrCast(@alignCast(userdata.?));
+        ctx.mutex.lock();
+        defer ctx.mutex.unlock();
+        ctx.pending = true;
+        ctx.condition.signal();
+    }
+};
