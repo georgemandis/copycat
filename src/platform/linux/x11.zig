@@ -17,6 +17,14 @@ var our_property_atom: c.Atom = 0; // used as the property name for XConvertSele
 var utf8_string_atom: c.Atom = 0;
 var incr_atom: c.Atom = 0;
 
+// The pairs currently being served. Borrowed from the caller for the
+// duration of the writeFormat/writeMultiple call.
+var write_pairs: []const mod.FormatDataPair = &.{};
+// Parallel array of pre-interned atoms for each pair's format string, so the
+// SelectionRequest handler doesn't need to re-intern on every paste. Owned
+// by the module-level allocator for the duration of the write call.
+var write_atoms: []c.Atom = &.{};
+
 // MIME-type -> atom cache. Populated lazily.
 const AtomEntry = struct {
     mime: []u8,
@@ -303,4 +311,157 @@ pub fn clear() !void {
     const d = display orelse return ClipboardError.PasteboardUnavailable;
     _ = c.XSetSelectionOwner(d, clipboard_atom, c.None, c.CurrentTime);
     _ = c.XSync(d, c.False);
+}
+
+// ---------------------------------------------------------------------------
+// writeFormat / writeMultiple via SelectionRequest service loop
+// ---------------------------------------------------------------------------
+
+const SELECTION_WRITE_TIMEOUT_MS: i64 = 5_000;
+const SELECTION_WRITE_GRACE_MS: i64 = 500;
+
+fn respondToSelectionRequest(ev: *c.XSelectionRequestEvent) bool {
+    const alloc = mod_allocator orelse return false;
+
+    // Build the SelectionNotify reply we'll send back regardless of success.
+    var reply: c.XSelectionEvent = std.mem.zeroes(c.XSelectionEvent);
+    reply.type = c.SelectionNotify;
+    reply.display = ev.display;
+    reply.requestor = ev.requestor;
+    reply.selection = ev.selection;
+    reply.target = ev.target;
+    reply.time = ev.time;
+    reply.property = 0; // default: refused
+
+    // If the requestor asked for TARGETS, answer with the list of formats
+    // we're currently serving PLUS the always-present TARGETS atom itself.
+    if (ev.target == targets_atom) {
+        var list = std.ArrayList(c.Atom).initCapacity(alloc, write_atoms.len + 1) catch return false;
+        defer list.deinit();
+        list.append(targets_atom) catch return false;
+        for (write_atoms) |a| list.append(a) catch return false;
+
+        _ = c.XChangeProperty(
+            ev.display,
+            ev.requestor,
+            ev.property,
+            c.XA_ATOM,
+            32,
+            c.PropModeReplace,
+            @ptrCast(list.items.ptr),
+            @intCast(list.items.len),
+        );
+        reply.property = ev.property;
+    } else {
+        // Match the request target against one of our stored format atoms.
+        var matched: ?usize = null;
+        for (write_atoms, 0..) |a, i| {
+            if (a == ev.target) {
+                matched = i;
+                break;
+            }
+        }
+        if (matched) |idx| {
+            const bytes = write_pairs[idx].data;
+            _ = c.XChangeProperty(
+                ev.display,
+                ev.requestor,
+                ev.property,
+                ev.target,
+                8,
+                c.PropModeReplace,
+                bytes.ptr,
+                @intCast(bytes.len),
+            );
+            reply.property = ev.property;
+        }
+        // If nothing matched, reply.property stays 0 ("refused").
+    }
+
+    _ = c.XSendEvent(
+        ev.display,
+        ev.requestor,
+        c.False,
+        c.NoEventMask,
+        @ptrCast(&reply),
+    );
+    _ = c.XFlush(ev.display);
+    return reply.property != 0;
+}
+
+fn runSelectionServiceLoop() !void {
+    const d = display orelse return ClipboardError.NoDisplayServer;
+    const start = std.time.milliTimestamp();
+    var first_service_time: ?i64 = null;
+
+    while (true) {
+        const now = std.time.milliTimestamp();
+        if (first_service_time) |t| {
+            if (now - t >= SELECTION_WRITE_GRACE_MS) return; // grace exhausted -> success
+        }
+        if (now - start >= SELECTION_WRITE_TIMEOUT_MS) {
+            return; // No one pasted -- still a successful write (clipboard is owned).
+        }
+
+        const fd = c.ConnectionNumber(d);
+        var pfd = [_]std.posix.pollfd{.{ .fd = fd, .events = std.posix.POLL.IN, .revents = 0 }};
+        _ = std.posix.poll(&pfd, 100) catch return ClipboardError.PasteboardUnavailable;
+
+        while (c.XPending(d) > 0) {
+            var ev: c.XEvent = undefined;
+            _ = c.XNextEvent(d, &ev);
+            switch (ev.type) {
+                c.SelectionRequest => {
+                    const ok = respondToSelectionRequest(&ev.xselectionrequest);
+                    if (ok and first_service_time == null) {
+                        first_service_time = std.time.milliTimestamp();
+                    }
+                },
+                c.SelectionClear => {
+                    return; // Another client took ownership. Successful exit.
+                },
+                else => {},
+            }
+        }
+    }
+}
+
+pub fn writeFormat(alloc: Allocator, format: []const u8, data: []const u8) !void {
+    const pair = mod.FormatDataPair{ .format = format, .data = data };
+    const pairs = [_]mod.FormatDataPair{pair};
+    return writeMultiple(alloc, &pairs);
+}
+
+pub fn writeMultiple(alloc: Allocator, pairs: []const mod.FormatDataPair) !void {
+    _ = alloc; // unused: we use the module-level allocator for scratch state
+    const d = display orelse return ClipboardError.NoDisplayServer;
+    const our = mod_allocator orelse return ClipboardError.NoDisplayServer;
+
+    // Intern atoms for every format up front.
+    const atoms = try our.alloc(c.Atom, pairs.len);
+    defer our.free(atoms);
+    for (pairs, 0..) |p, i| {
+        const fmt_z = try our.dupeZ(u8, p.format);
+        defer our.free(fmt_z);
+        atoms[i] = c.XInternAtom(d, fmt_z.ptr, c.False);
+    }
+
+    // Install module state for the service loop.
+    write_pairs = pairs;
+    write_atoms = atoms;
+    defer {
+        write_pairs = &.{};
+        write_atoms = &.{};
+    }
+
+    // Claim ownership of CLIPBOARD.
+    _ = c.XSetSelectionOwner(d, clipboard_atom, our_window, c.CurrentTime);
+    _ = c.XFlush(d);
+
+    // Verify the server actually granted ownership.
+    const actual = c.XGetSelectionOwner(d, clipboard_atom);
+    if (actual != our_window) return ClipboardError.WriteFailed;
+
+    // Block until timeout / grace window / SelectionClear.
+    try runSelectionServiceLoop();
 }

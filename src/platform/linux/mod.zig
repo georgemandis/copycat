@@ -56,16 +56,13 @@ pub fn readFormat(allocator: Allocator, format: []const u8) !?[]const u8 {
 
 pub fn writeFormat(allocator: Allocator, format: []const u8, data: []const u8) !void {
     ensureInit(allocator);
-    _ = format;
-    _ = data;
-    // X11 write lands in Task 12.
+    if (x11_ready) return x11.writeFormat(allocator, format, data);
     return ClipboardError.NoDisplayServer;
 }
 
 pub fn writeMultiple(allocator: Allocator, pairs: []const FormatDataPair) !void {
     ensureInit(allocator);
-    _ = pairs;
-    // X11 write lands in Task 12.
+    if (x11_ready) return x11.writeMultiple(allocator, pairs);
     return ClipboardError.NoDisplayServer;
 }
 
