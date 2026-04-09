@@ -261,18 +261,6 @@ fn cmdRead(allocator: Allocator, args: []const []const u8) !void {
         std.process.exit(1);
     }
 
-    if (as_path and !isAllowlistedFileRef(format)) {
-        const stderr_file = std.fs.File.stderr();
-        var errbuf: [4096]u8 = undefined;
-        var ew = stderr_file.writer(&errbuf);
-        try ew.interface.print(
-            "Error: --as-path only supports file-reference formats: public.file-url, NSFilenamesPboardType, public.url\n",
-            .{},
-        );
-        try ew.interface.flush();
-        std.process.exit(1);
-    }
-
     // --- Dispatch ---
 
     if (!as_path) {
@@ -317,12 +305,8 @@ fn cmdRead(allocator: Allocator, args: []const []const u8) !void {
             error.MalformedUrl => try ew.interface.print("Error: failed to decode {s}: malformed URL\n", .{format}),
             error.InvalidPercentEncoding => try ew.interface.print("Error: failed to decode {s}: invalid percent-encoding\n", .{format}),
             error.MalformedPlist => try ew.interface.print("Error: failed to decode {s}: malformed plist\n", .{format}),
-            // Defense in depth: if isAllowlistedFileRef ever drifts from
-            // file_ref_allowlist in platform/macos.zig, this arm ensures the
-            // user still sees the spec-mandated allowlist message instead of
-            // a raw "UnsupportedFormat" error name.
             error.UnsupportedFormat => try ew.interface.print(
-                "Error: --as-path only supports file-reference formats: public.file-url, NSFilenamesPboardType, public.url\n",
+                "Error: --as-path does not support this format on this platform\n",
                 .{},
             ),
             error.PasteboardUnavailable => try ew.interface.print(
@@ -355,19 +339,6 @@ fn cmdRead(allocator: Allocator, args: []const []const u8) !void {
             try stdout_file.writeAll(&[_]u8{terminator});
         }
     }
-}
-
-/// Duplicated from platform/macos.zig on purpose: main.zig is the CLI layer
-/// and needs to reject unsupported formats BEFORE calling into the clipboard
-/// API, so the error message is emitted from the CLI and not surfaced via
-/// the generic `UnsupportedFormat` error code. The list is small and tightly
-/// coupled to the spec; if it diverges, a single test will catch it.
-fn isAllowlistedFileRef(format: []const u8) bool {
-    const allowed = [_][]const u8{ "public.file-url", "NSFilenamesPboardType", "public.url" };
-    for (allowed) |a| {
-        if (std.mem.eql(u8, format, a)) return true;
-    }
-    return false;
 }
 
 fn cmdWrite(allocator: Allocator, args: []const []const u8) !void {
