@@ -336,10 +336,10 @@ fn respondToSelectionRequest(ev: *c.XSelectionRequestEvent) bool {
     // If the requestor asked for TARGETS, answer with the list of formats
     // we're currently serving PLUS the always-present TARGETS atom itself.
     if (ev.target == targets_atom) {
-        var list = std.ArrayList(c.Atom).initCapacity(alloc, write_atoms.len + 1) catch return false;
-        defer list.deinit();
-        list.append(targets_atom) catch return false;
-        for (write_atoms) |a| list.append(a) catch return false;
+        const buf = alloc.alloc(c.Atom, write_atoms.len + 1) catch return false;
+        defer alloc.free(buf);
+        buf[0] = targets_atom;
+        @memcpy(buf[1..], write_atoms);
 
         _ = c.XChangeProperty(
             ev.display,
@@ -348,8 +348,8 @@ fn respondToSelectionRequest(ev: *c.XSelectionRequestEvent) bool {
             c.XA_ATOM,
             32,
             c.PropModeReplace,
-            @ptrCast(list.items.ptr),
-            @intCast(list.items.len),
+            @ptrCast(buf.ptr),
+            @intCast(buf.len),
         );
         reply.property = ev.property;
     } else {
