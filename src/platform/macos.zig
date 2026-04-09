@@ -3,6 +3,16 @@ const objc = @import("../objc.zig");
 
 const Allocator = std.mem.Allocator;
 
+/// Callback invoked when the clipboard changes. Runs on the library's
+/// background subscription thread, not the caller's thread.
+pub const SubscribeCallback = *const fn (userdata: ?*anyopaque) void;
+
+/// Opaque handle returned by subscribe. `id == 0` is the invalid-handle
+/// sentinel; unsubscribe on a zero-initialized handle is a no-op.
+pub const SubscribeHandle = struct {
+    id: u64,
+};
+
 /// Get the NSPasteboard generalPasteboard singleton. Returns null if unavailable (e.g. daemon context).
 fn getPasteboard() ?objc.id {
     const NSPasteboard = objc.getClass("NSPasteboard") orelse return null;
@@ -23,6 +33,11 @@ pub const ClipboardError = error{
     UnsupportedFormat,
     FormatNotFound,
     MalformedPlist,
+    // New for cross-platform (Linux) port; defined on every platform so
+    // `clipboard.zig` can re-export a unified error set.
+    NoDisplayServer,
+    SubscribeFailed,
+    MalformedUriList,
 };
 
 /// List all format identifiers (UTIs) on the clipboard.
@@ -224,6 +239,25 @@ pub fn decodePathsForFormat(
     }
 
     unreachable; // allowlist check above guarantees one of the branches matches
+}
+
+/// STUB: replaced by a real NSPasteboardDidChangeNotification implementation
+/// in Task 4. Returns `error.SubscribeFailed` so callers fail fast if they
+/// try to use it before Task 4 lands.
+pub fn subscribe(
+    allocator: Allocator,
+    callback: SubscribeCallback,
+    userdata: ?*anyopaque,
+) !SubscribeHandle {
+    _ = allocator;
+    _ = callback;
+    _ = userdata;
+    return ClipboardError.SubscribeFailed;
+}
+
+/// STUB: no-op until Task 4 wires up real state.
+pub fn unsubscribe(handle: SubscribeHandle) void {
+    _ = handle;
 }
 
 /// Parse an `NSFilenamesPboardType` binary plist (bytes from the pasteboard)
