@@ -3,6 +3,32 @@ const clipboard = @import("clipboard");
 
 const Allocator = std.mem.Allocator;
 
+fn handleTopLevelError(err: anyerror) void {
+    const stderr_file = std.fs.File.stderr();
+    var errbuf: [4096]u8 = undefined;
+    var ew = stderr_file.writer(&errbuf);
+    switch (err) {
+        error.NoDisplayServer => ew.interface.print(
+            "Error: no display server available (is $WAYLAND_DISPLAY or $DISPLAY set?)\n",
+            .{},
+        ) catch {},
+        error.SubscribeFailed => ew.interface.print(
+            "Error: clipboard subscribe failed on this platform or backend\n",
+            .{},
+        ) catch {},
+        error.PasteboardUnavailable => ew.interface.print(
+            "Error: clipboard is unavailable (no pasteboard in this context)\n",
+            .{},
+        ) catch {},
+        else => ew.interface.print(
+            "Error: {s}\n",
+            .{@errorName(err)},
+        ) catch {},
+    }
+    ew.interface.flush() catch {};
+    std.process.exit(2);
+}
+
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -52,15 +78,15 @@ pub fn main() !void {
         try hw.interface.flush();
         return;
     } else if (std.mem.eql(u8, command, "list")) {
-        return cmdList(allocator, json_output);
+        return cmdList(allocator, json_output) catch |err| return handleTopLevelError(err);
     } else if (std.mem.eql(u8, command, "read")) {
-        return cmdRead(allocator, cmd_args[1..]);
+        return cmdRead(allocator, cmd_args[1..]) catch |err| return handleTopLevelError(err);
     } else if (std.mem.eql(u8, command, "write")) {
-        return cmdWrite(allocator, cmd_args[1..]);
+        return cmdWrite(allocator, cmd_args[1..]) catch |err| return handleTopLevelError(err);
     } else if (std.mem.eql(u8, command, "clear")) {
-        return cmdClear();
+        return cmdClear() catch |err| return handleTopLevelError(err);
     } else if (std.mem.eql(u8, command, "watch")) {
-        return cmdWatch(allocator, cmd_args[1..], json_output);
+        return cmdWatch(allocator, cmd_args[1..], json_output) catch |err| return handleTopLevelError(err);
     } else {
         const stderr_file = std.fs.File.stderr();
         var errbuf: [4096]u8 = undefined;
@@ -309,8 +335,12 @@ fn cmdRead(allocator: Allocator, args: []const []const u8) !void {
                 "Error: --as-path does not support this format on this platform\n",
                 .{},
             ),
-            error.PasteboardUnavailable => try ew.interface.print(
-                "Error: clipboard is unavailable (no pasteboard in this context)\n",
+            error.PasteboardUnavailable, error.NoDisplayServer => try ew.interface.print(
+                "Error: clipboard is unavailable (no display server or pasteboard in this context)\n",
+                .{},
+            ),
+            error.MalformedUriList => try ew.interface.print(
+                "Error: malformed text/uri-list payload on clipboard\n",
                 .{},
             ),
             else => try ew.interface.print("Error: failed to decode {s}: {s}\n", .{ format, @errorName(err) }),

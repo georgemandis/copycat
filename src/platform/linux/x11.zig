@@ -465,3 +465,187 @@ pub fn writeMultiple(alloc: Allocator, pairs: []const mod.FormatDataPair) !void 
     // Block until timeout / grace window / SelectionClear.
     try runSelectionServiceLoop();
 }
+
+// ---------------------------------------------------------------------------
+// subscribe / unsubscribe via background TARGETS hash poll
+// ---------------------------------------------------------------------------
+
+const Subscriber = struct {
+    id: u64,
+    callback: mod.SubscribeCallback,
+    userdata: ?*anyopaque,
+};
+
+var subs_mutex: std.Thread.Mutex = .{};
+var subs: std.ArrayListUnmanaged(Subscriber) = .{};
+var next_sub_id: u64 = 1; // id=0 is reserved as invalid-handle sentinel
+var poll_thread: ?std.Thread = null;
+var poll_stop: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
+var change_count: std.atomic.Value(i64) = std.atomic.Value(i64).init(0);
+
+pub fn getChangeCount() i64 {
+    return change_count.load(.monotonic);
+}
+
+const DEFAULT_POLL_MS: i32 = 500;
+
+fn pollThreadMain() void {
+    const d = display orelse return;
+
+    var last_hash: u64 = 0;
+    var last_owner: c.Window = 0;
+
+    // Hidden env-var for tuning during debugging. Undocumented on purpose.
+    const poll_ms: i32 = blk: {
+        const raw = std.posix.getenv("LINUX_X11_POLL_MS") orelse break :blk DEFAULT_POLL_MS;
+        break :blk std.fmt.parseInt(i32, raw, 10) catch DEFAULT_POLL_MS;
+    };
+
+    while (!poll_stop.load(.acquire)) {
+        // Drain any stray events without blocking.
+        while (c.XPending(d) > 0) {
+            var ev: c.XEvent = undefined;
+            _ = c.XNextEvent(d, &ev);
+        }
+
+        // Query current owner + targets.
+        const current_owner = c.XGetSelectionOwner(d, clipboard_atom);
+
+        // Hash TARGETS contents. If the request times out or no one owns the
+        // selection, hash is 0, which is distinct from "owner with empty targets".
+        const hash = hashTargets(d) catch 0;
+
+        const changed = (hash != last_hash) or (current_owner != last_owner);
+        if (changed) {
+            last_hash = hash;
+            last_owner = current_owner;
+            _ = change_count.fetchAdd(1, .monotonic);
+            fanout();
+        }
+
+        // Sleep/wait for next tick OR early wake if X events arrive OR shutdown.
+        const fd = c.ConnectionNumber(d);
+        var pfd = [_]std.posix.pollfd{.{ .fd = fd, .events = std.posix.POLL.IN, .revents = 0 }};
+        _ = std.posix.poll(&pfd, poll_ms) catch {};
+    }
+}
+
+fn hashTargets(d: *c.Display) !u64 {
+    // Dedicated destination property for subscribe-thread TARGETS reads so
+    // we don't race with the foreground thread's own `our_property_atom`
+    // usage in readFormat.
+    const prop_atom = c.XInternAtom(d, "_CLIPBOARD_MGR_TARGETS_SUB", c.False);
+
+    _ = c.XConvertSelection(
+        d,
+        clipboard_atom,
+        targets_atom,
+        prop_atom,
+        our_window,
+        c.CurrentTime,
+    );
+    _ = c.XFlush(d);
+
+    // Wait briefly for SelectionNotify. We use a 200ms budget here — longer
+    // than a happy-path roundtrip, short enough that a stuck request doesn't
+    // stall the poll thread.
+    const start = std.time.milliTimestamp();
+    var got_notify = false;
+    while (std.time.milliTimestamp() - start < 200) {
+        var ev: c.XEvent = undefined;
+        if (c.XCheckTypedWindowEvent(d, our_window, c.SelectionNotify, &ev) != 0) {
+            got_notify = true;
+            break;
+        }
+        std.Thread.sleep(5 * std.time.ns_per_ms);
+    }
+    if (!got_notify) return 0;
+
+    // Read the property bytes.
+    var actual_type: c.Atom = 0;
+    var actual_format: c_int = 0;
+    var nitems: c_ulong = 0;
+    var bytes_after: c_ulong = 0;
+    var data_ptr: [*c]u8 = null;
+    const status = c.XGetWindowProperty(
+        d,
+        our_window,
+        prop_atom,
+        0,
+        1 << 20,
+        c.True, // delete after read
+        c.XA_ATOM,
+        &actual_type,
+        &actual_format,
+        &nitems,
+        &bytes_after,
+        &data_ptr,
+    );
+    if (status != c.Success or data_ptr == null) return 0;
+    defer _ = c.XFree(data_ptr);
+
+    // Hash nitems * sizeof(Atom) bytes.
+    const byte_len: usize = @as(usize, @intCast(nitems)) * @sizeOf(c.Atom);
+    var hasher = std.hash.Fnv1a_64.init();
+    hasher.update(data_ptr[0..byte_len]);
+    return hasher.final();
+}
+
+fn fanout() void {
+    var snapshot_buf: [64]Subscriber = undefined;
+    var count: usize = 0;
+    {
+        subs_mutex.lock();
+        defer subs_mutex.unlock();
+        count = @min(subs.items.len, snapshot_buf.len);
+        for (subs.items[0..count], 0..) |s, i| snapshot_buf[i] = s;
+    }
+    for (snapshot_buf[0..count]) |s| {
+        s.callback(s.userdata);
+    }
+}
+
+pub fn subscribe(
+    _: Allocator,
+    callback: mod.SubscribeCallback,
+    userdata: ?*anyopaque,
+) !mod.SubscribeHandle {
+    const our = mod_allocator orelse return ClipboardError.NoDisplayServer;
+
+    subs_mutex.lock();
+    defer subs_mutex.unlock();
+
+    const id = next_sub_id;
+    next_sub_id += 1;
+    subs.append(our, .{ .id = id, .callback = callback, .userdata = userdata }) catch {
+        return ClipboardError.SubscribeFailed;
+    };
+
+    if (poll_thread == null) {
+        poll_stop.store(false, .release);
+        poll_thread = std.Thread.spawn(.{}, pollThreadMain, .{}) catch {
+            _ = subs.pop();
+            return ClipboardError.SubscribeFailed;
+        };
+    }
+
+    return .{ .id = id };
+}
+
+pub fn unsubscribe(handle: mod.SubscribeHandle) void {
+    subs_mutex.lock();
+    defer subs_mutex.unlock();
+
+    var i: usize = 0;
+    while (i < subs.items.len) {
+        if (subs.items[i].id == handle.id) {
+            _ = subs.swapRemove(i);
+            break;
+        }
+        i += 1;
+    }
+
+    // Spec: we deliberately do NOT stop the poll thread when the last
+    // subscriber leaves. Process exit is the only stop signal. See the
+    // design doc's "Subscribe lifetime" section.
+}

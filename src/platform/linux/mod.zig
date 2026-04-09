@@ -75,17 +75,34 @@ pub fn clear() !void {
 }
 
 pub fn getChangeCount() i64 {
-    return 0; // X11 getChangeCount lands in Task 13.
+    if (x11_ready) return x11.getChangeCount();
+    return 0;
+}
+
+// ---------------------------------------------------------------------------
+// Path decoding for file-reference formats (Linux: text/uri-list only)
+// ---------------------------------------------------------------------------
+
+const file_ref_allowlist = [_][]const u8{"text/uri-list"};
+
+fn isFileRefFormat(format: []const u8) bool {
+    for (file_ref_allowlist) |allowed| {
+        if (std.mem.eql(u8, format, allowed)) return true;
+    }
+    return false;
 }
 
 pub fn decodePathsForFormat(
     allocator: Allocator,
     format: []const u8,
 ) (ClipboardError || paths.DecodePathError || Allocator.Error)![]const []const u8 {
+    if (!isFileRefFormat(format)) return ClipboardError.UnsupportedFormat;
+
     ensureInit(allocator);
-    _ = format;
-    // Wired in Task 14.
-    return ClipboardError.NoDisplayServer;
+    const raw = (try readFormat(allocator, format)) orelse return ClipboardError.FormatNotFound;
+    defer allocator.free(raw);
+
+    return paths.decodeUriList(allocator, raw);
 }
 
 pub fn subscribe(
@@ -94,12 +111,13 @@ pub fn subscribe(
     userdata: ?*anyopaque,
 ) !SubscribeHandle {
     ensureInit(allocator);
-    _ = callback;
-    _ = userdata;
-    // X11 subscribe lands in Task 13.
+    if (x11_ready) return x11.subscribe(allocator, callback, userdata);
     return ClipboardError.SubscribeFailed;
 }
 
 pub fn unsubscribe(handle: SubscribeHandle) void {
-    _ = handle;
+    if (x11_ready) {
+        x11.unsubscribe(handle);
+        return;
+    }
 }
