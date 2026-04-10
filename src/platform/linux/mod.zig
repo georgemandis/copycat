@@ -12,6 +12,7 @@ pub const ClipboardError = error{
     NoDisplayServer,
     SubscribeFailed,
     MalformedUriList,
+    MalformedHDrop,
 };
 
 pub const FormatDataPair = struct {

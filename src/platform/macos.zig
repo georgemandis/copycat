@@ -55,6 +55,7 @@ pub const ClipboardError = error{
     NoDisplayServer,
     SubscribeFailed,
     MalformedUriList,
+    MalformedHDrop,
 };
 
 /// List all format identifiers (UTIs) on the clipboard.
