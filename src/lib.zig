@@ -192,7 +192,7 @@ export fn clipboard_change_count() i64 {
 /// On success (out_status == 0): out_json points to a null-terminated JSON array
 /// string that the caller MUST free with clipboard_free().
 /// On error: out_json is null, out_status is non-zero.
-pub export fn clipboard_decode_paths_for_format(
+export fn clipboard_decode_paths_for_format(
     format: [*:0]const u8,
     out_json: *?[*:0]u8,
     out_status: *i32,
@@ -252,6 +252,15 @@ pub export fn clipboard_decode_paths_for_format(
                 '\t' => json.appendSlice("\\t") catch {
                     out_status.* = -1;
                     return;
+                },
+                // Remaining JSON-illegal control characters: U+0000-U+001F minus the named ones above
+                0x00...0x08, 0x0B, 0x0C, 0x0E...0x1F => {
+                    var buf: [6]u8 = undefined;
+                    const escaped = std.fmt.bufPrint(&buf, "\\u{X:0>4}", .{c}) catch unreachable;
+                    json.appendSlice(escaped) catch {
+                        out_status.* = -1;
+                        return;
+                    };
                 },
                 else => json.append(c) catch {
                     out_status.* = -1;
