@@ -185,6 +185,99 @@ export fn clipboard_change_count() i64 {
     return clipboard.getChangeCount();
 }
 
+/// Decode file-reference clipboard formats into filesystem paths.
+/// Returns a JSON array of path strings via out_json.
+/// Status codes: 0=success, 1=format not found, 2=unsupported format, -1=error
+///
+/// On success (out_status == 0): out_json points to a null-terminated JSON array
+/// string that the caller MUST free with clipboard_free().
+/// On error: out_json is null, out_status is non-zero.
+pub export fn clipboard_decode_paths_for_format(
+    format: [*:0]const u8,
+    out_json: *?[*:0]u8,
+    out_status: *i32,
+) void {
+    out_json.* = null;
+    out_status.* = 0;
+
+    const format_slice = std.mem.sliceTo(format, 0);
+    const paths_result = clipboard.decodePathsForFormat(allocator, format_slice) catch |err| {
+        out_status.* = switch (err) {
+            error.FormatNotFound => @as(i32, 1),
+            error.UnsupportedFormat => @as(i32, 2),
+            else => @as(i32, -1),
+        };
+        return;
+    };
+    defer {
+        for (paths_result) |p| allocator.free(p);
+        allocator.free(paths_result);
+    }
+
+    var json = std.array_list.Managed(u8).init(allocator);
+    defer json.deinit();
+
+    json.append('[') catch {
+        out_status.* = -1;
+        return;
+    };
+
+    for (paths_result, 0..) |path, i| {
+        if (i > 0) json.append(',') catch {
+            out_status.* = -1;
+            return;
+        };
+        json.append('"') catch {
+            out_status.* = -1;
+            return;
+        };
+        for (path) |c| {
+            switch (c) {
+                '"' => json.appendSlice("\\\"") catch {
+                    out_status.* = -1;
+                    return;
+                },
+                '\\' => json.appendSlice("\\\\") catch {
+                    out_status.* = -1;
+                    return;
+                },
+                '\n' => json.appendSlice("\\n") catch {
+                    out_status.* = -1;
+                    return;
+                },
+                '\r' => json.appendSlice("\\r") catch {
+                    out_status.* = -1;
+                    return;
+                },
+                '\t' => json.appendSlice("\\t") catch {
+                    out_status.* = -1;
+                    return;
+                },
+                else => json.append(c) catch {
+                    out_status.* = -1;
+                    return;
+                },
+            }
+        }
+        json.append('"') catch {
+            out_status.* = -1;
+            return;
+        };
+    }
+
+    json.append(']') catch {
+        out_status.* = -1;
+        return;
+    };
+
+    const result = allocator.allocSentinel(u8, json.items.len, 0) catch {
+        out_status.* = -1;
+        return;
+    };
+    @memcpy(result[0..json.items.len], json.items);
+    out_json.* = result;
+}
+
 /// Free a pointer previously returned by this library. Specifically:
 ///   - the string returned by clipboard_list_formats()
 ///   - the .data field of a ClipboardData with status == 0 from clipboard_read_format()
