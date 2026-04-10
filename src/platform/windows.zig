@@ -238,13 +238,29 @@ pub fn clear() !void {
     _ = EmptyClipboard();
 }
 
+const file_ref_allowlist = [_][]const u8{"CF_HDROP"};
+
+fn isFileRefFormat(format: []const u8) bool {
+    for (file_ref_allowlist) |allowed| {
+        if (std.mem.eql(u8, format, allowed)) return true;
+    }
+    return false;
+}
+
 pub fn decodePathsForFormat(
     allocator: Allocator,
     format: []const u8,
 ) (ClipboardError || paths.DecodePathError || Allocator.Error)![]const []const u8 {
-    _ = allocator;
-    _ = format;
-    return ClipboardError.PasteboardUnavailable;
+    if (!isFileRefFormat(format)) return error.UnsupportedFormat;
+
+    const data = (readFormat(allocator, format) catch |err| switch (err) {
+        error.UnsupportedFormat => return error.UnsupportedFormat,
+        error.PasteboardUnavailable => return error.PasteboardUnavailable,
+        else => return error.UnsupportedFormat,
+    }) orelse return error.FormatNotFound;
+    defer allocator.free(data);
+
+    return try paths.decodeHDrop(allocator, data);
 }
 
 pub fn subscribe(
