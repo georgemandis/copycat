@@ -189,6 +189,16 @@ fn isLikelyText(format: []const u8) bool {
         "public.html",
         "public.rtf",
         "public.file-url",
+        // Linux
+        "UTF8_STRING",
+        "text/plain",
+        "text/html",
+        "text/uri-list",
+        // Windows
+        "CF_TEXT",
+        "CF_UNICODETEXT",
+        "CF_OEMTEXT",
+        "HTML Format",
     };
     for (text_formats) |tf| {
         if (std.mem.eql(u8, format, tf)) return true;
