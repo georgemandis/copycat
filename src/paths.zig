@@ -15,6 +15,8 @@ pub const DecodePathError = error{
     MalformedUrl,
     /// A `%` escape was truncated or contained non-hex characters.
     InvalidPercentEncoding,
+    /// A DROPFILES (CF_HDROP) blob was too short or structurally invalid.
+    MalformedHDrop,
     /// Allocator ran out of memory.
     OutOfMemory,
 };
@@ -113,6 +115,89 @@ pub fn decodeUriList(
         const decoded = try decodeFileUrl(allocator, line);
         errdefer allocator.free(decoded);
         try out.append(decoded);
+    }
+
+    return try out.toOwnedSlice();
+}
+
+/// Decodes a Windows `CF_HDROP` clipboard blob (a serialised `DROPFILES` struct)
+/// into a slice of UTF-8 path strings.
+///
+/// The `DROPFILES` layout (all fields little-endian):
+///   offset  0, u32: pFiles  — byte offset from the start of the struct to the file list
+///   offset  4, u32: pt.x    — (ignored)
+///   offset  8, u32: pt.y    — (ignored)
+///   offset 12, u32: fNC     — (ignored)
+///   offset 16, u32: fWide   — 0 = ANSI, non-zero = UTF-16LE
+///
+/// The file list starts at `data[pFiles..]` and consists of null-terminated
+/// strings (each path followed by a NUL character/code-unit), terminated by an
+/// extra NUL (i.e. a double-NUL marks the end).
+///
+/// Returns `error.MalformedHDrop` if `data` is shorter than 20 bytes (the
+/// minimum header size) or if `pFiles` points past the end of `data`.
+///
+/// Caller owns the returned outer slice AND each inner path string.
+pub fn decodeHDrop(allocator: Allocator, data: []const u8) DecodePathError![][]u8 {
+    // The DROPFILES header is exactly 20 bytes.
+    if (data.len < 20) return DecodePathError.MalformedHDrop;
+
+    const p_files = std.mem.readInt(u32, data[0..4], .little);
+    const f_wide = std.mem.readInt(u32, data[16..20], .little);
+
+    if (p_files > data.len) return DecodePathError.MalformedHDrop;
+
+    const file_list = data[p_files..];
+
+    var out = try std.array_list.Managed([]u8).initCapacity(allocator, 4);
+    errdefer {
+        for (out.items) |p| allocator.free(p);
+        out.deinit();
+    }
+
+    if (f_wide != 0) {
+        // UTF-16LE: iterate over 2-byte code units.
+        // We work on raw bytes (unaligned) and use readInt to build u16 values,
+        // then batch them into a []u16 buffer for std.unicode.utf16LeToUtf8Alloc.
+        var pos: usize = 0;
+        while (pos + 1 < file_list.len) {
+            // Collect one null-terminated UTF-16LE string into a u16 buffer.
+            var units = try std.array_list.Managed(u16).initCapacity(allocator, 64);
+            defer units.deinit();
+
+            while (pos + 1 < file_list.len) {
+                const unit = std.mem.readInt(u16, file_list[pos..][0..2], .little);
+                pos += 2;
+                if (unit == 0) break; // null terminator for this path
+                try units.append(unit);
+            }
+
+            // An empty unit list means we hit the double-null terminator.
+            if (units.items.len == 0) break;
+
+            const utf8 = std.unicode.utf16LeToUtf8Alloc(allocator, units.items) catch |err| switch (err) {
+                error.OutOfMemory => return DecodePathError.OutOfMemory,
+                else => return DecodePathError.MalformedHDrop,
+            };
+            errdefer allocator.free(utf8);
+            try out.append(utf8);
+        }
+    } else {
+        // ANSI: single-byte null-terminated strings.
+        var pos: usize = 0;
+        while (pos < file_list.len) {
+            if (file_list[pos] == 0) break; // double-null terminator
+
+            // Find the null terminator for this path.
+            const start = pos;
+            while (pos < file_list.len and file_list[pos] != 0) : (pos += 1) {}
+            const path_bytes = file_list[start..pos];
+            pos += 1; // skip the null terminator
+
+            const copy = try allocator.dupe(u8, path_bytes);
+            errdefer allocator.free(copy);
+            try out.append(copy);
+        }
     }
 
     return try out.toOwnedSlice();
@@ -389,4 +474,64 @@ test "decodeUriList rejects invalid percent encoding" {
         DecodePathError.InvalidPercentEncoding,
         decodeUriList(std.testing.allocator, "file:///tmp/bad%ZZ\n"),
     );
+}
+
+test "decodeHDrop: single wide-char path" {
+    // DROPFILES header: pFiles=20, pt=(0,0), fNC=0, fWide=1
+    // Followed by "C:\test.txt\0\0" in UTF-16LE
+    const header = [_]u8{
+        0x14, 0x00, 0x00, 0x00, // pFiles = 20
+        0x00, 0x00, 0x00, 0x00, // pt.x = 0
+        0x00, 0x00, 0x00, 0x00, // pt.y = 0
+        0x00, 0x00, 0x00, 0x00, // fNC = 0
+        0x01, 0x00, 0x00, 0x00, // fWide = 1 (Unicode)
+    };
+    // "C:\test.txt" in UTF-16LE + null + null (double-null terminator)
+    const path_data = [_]u8{
+        'C', 0, ':', 0, '\\', 0, 't', 0, 'e', 0, 's', 0, 't', 0, '.', 0, 't', 0, 'x', 0, 't', 0,
+        0, 0, // null terminator
+        0, 0, // double-null terminator
+    };
+    const data = header ++ path_data;
+
+    const paths = try decodeHDrop(std.testing.allocator, &data);
+    defer {
+        for (paths) |p| std.testing.allocator.free(p);
+        std.testing.allocator.free(paths);
+    }
+
+    try std.testing.expectEqual(@as(usize, 1), paths.len);
+    try std.testing.expectEqualStrings("C:\\test.txt", paths[0]);
+}
+
+test "decodeHDrop: multiple wide-char paths" {
+    const header = [_]u8{
+        0x14, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00,
+        0x01, 0x00, 0x00, 0x00,
+    };
+    // "A\0" + null + "B\0" + null + double-null
+    const path_data = [_]u8{
+        'A', 0, 0, 0, // "A" + null
+        'B', 0, 0, 0, // "B" + null
+        0, 0,         // double-null terminator
+    };
+    const data = header ++ path_data;
+
+    const paths = try decodeHDrop(std.testing.allocator, &data);
+    defer {
+        for (paths) |p| std.testing.allocator.free(p);
+        std.testing.allocator.free(paths);
+    }
+
+    try std.testing.expectEqual(@as(usize, 2), paths.len);
+    try std.testing.expectEqualStrings("A", paths[0]);
+    try std.testing.expectEqualStrings("B", paths[1]);
+}
+
+test "decodeHDrop: data too short for header" {
+    const short = [_]u8{ 0x14, 0x00 };
+    try std.testing.expectError(error.MalformedHDrop, decodeHDrop(std.testing.allocator, &short));
 }
