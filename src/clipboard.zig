@@ -5,7 +5,8 @@ const Allocator = std.mem.Allocator;
 const platform = switch (builtin.os.tag) {
     .macos => @import("platform/macos.zig"),
     .linux => @import("platform/linux/mod.zig"),
-    else => @compileError("Unsupported platform. Supported: macOS, Linux."),
+    .windows => @import("platform/windows.zig"),
+    else => @compileError("Unsupported platform. Supported: macOS, Linux, Windows."),
 };
 
 pub const FormatDataPair = platform.FormatDataPair;

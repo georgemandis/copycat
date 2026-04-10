@@ -37,6 +37,11 @@ pub fn build(b: *std.Build) void {
             clipboard_mod.addCSourceFile(.{ .file = wl_code, .flags = &.{} });
             clipboard_mod.addIncludePath(wl_header.dirname());
         },
+        .windows => {
+            clipboard_mod.link_libc = true;
+            clipboard_mod.linkSystemLibrary("kernel32", .{});
+            clipboard_mod.linkSystemLibrary("user32", .{});
+        },
         else => {
             // Other platforms are not supported by the library yet; the
             // clipboard.zig @compileError still enforces that at the Zig
