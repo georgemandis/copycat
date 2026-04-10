@@ -63,6 +63,12 @@ extern "kernel32" fn GlobalSize(hMem: HANDLE) callconv(.winapi) SIZE_T;
 extern "kernel32" fn GlobalAlloc(uFlags: UINT, dwBytes: SIZE_T) callconv(.winapi) ?HANDLE;
 
 // ---------------------------------------------------------------------------
+// GlobalAlloc flags.
+// ---------------------------------------------------------------------------
+
+const GMEM_MOVEABLE: UINT = 0x0002;
+
+// ---------------------------------------------------------------------------
 // Standard clipboard format table.
 // CF_* constants as defined in winuser.h.
 // ---------------------------------------------------------------------------
@@ -198,20 +204,38 @@ pub fn readFormat(allocator: Allocator, format: []const u8) !?[]const u8 {
 // ---------------------------------------------------------------------------
 
 pub fn writeFormat(allocator: Allocator, format: []const u8, data: []const u8) !void {
-    _ = allocator;
-    _ = format;
-    _ = data;
-    return ClipboardError.PasteboardUnavailable;
+    const id = try formatNameToId(allocator, format);
+    if (OpenClipboard(null) == 0) return error.PasteboardUnavailable;
+    defer _ = CloseClipboard();
+    _ = EmptyClipboard();
+    const hmem = GlobalAlloc(GMEM_MOVEABLE, data.len) orelse return error.PasteboardUnavailable;
+    const dest = GlobalLock(hmem) orelse return error.PasteboardUnavailable;
+    const dest_slice: [*]u8 = @ptrCast(dest);
+    @memcpy(dest_slice[0..data.len], data);
+    _ = GlobalUnlock(hmem);
+    if (SetClipboardData(id, hmem) == null) return error.PasteboardUnavailable;
+    // SetClipboardData takes ownership — do NOT free hmem
 }
 
 pub fn writeMultiple(allocator: Allocator, pairs: []const FormatDataPair) !void {
-    _ = allocator;
-    _ = pairs;
-    return ClipboardError.PasteboardUnavailable;
+    if (OpenClipboard(null) == 0) return error.PasteboardUnavailable;
+    defer _ = CloseClipboard();
+    _ = EmptyClipboard();
+    for (pairs) |pair| {
+        const id = formatNameToId(allocator, pair.format) catch continue;
+        const hmem = GlobalAlloc(GMEM_MOVEABLE, pair.data.len) orelse continue;
+        const dest = GlobalLock(hmem) orelse continue;
+        const dest_slice: [*]u8 = @ptrCast(dest);
+        @memcpy(dest_slice[0..pair.data.len], pair.data);
+        _ = GlobalUnlock(hmem);
+        _ = SetClipboardData(id, hmem);
+    }
 }
 
 pub fn clear() !void {
-    return ClipboardError.PasteboardUnavailable;
+    if (OpenClipboard(null) == 0) return error.PasteboardUnavailable;
+    defer _ = CloseClipboard();
+    _ = EmptyClipboard();
 }
 
 pub fn decodePathsForFormat(
