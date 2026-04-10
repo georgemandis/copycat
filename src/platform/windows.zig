@@ -42,6 +42,14 @@ const UINT = std.os.windows.UINT;
 const LPVOID = ?*anyopaque;
 const SIZE_T = std.os.windows.SIZE_T;
 const WCHAR = u16;
+const HINSTANCE = ?*anyopaque;
+const HICON = ?*anyopaque;
+const HCURSOR = ?*anyopaque;
+const HBRUSH = ?*anyopaque;
+const LPCWSTR = ?[*:0]const WCHAR;
+const WPARAM = usize;
+const LPARAM = isize;
+const LRESULT = isize;
 
 // ---------------------------------------------------------------------------
 // Win32 extern declarations — NOT in std.os.windows, so we declare them here.
@@ -61,6 +69,75 @@ extern "kernel32" fn GlobalLock(hMem: HANDLE) callconv(.winapi) ?*anyopaque;
 extern "kernel32" fn GlobalUnlock(hMem: HANDLE) callconv(.winapi) BOOL;
 extern "kernel32" fn GlobalSize(hMem: HANDLE) callconv(.winapi) SIZE_T;
 extern "kernel32" fn GlobalAlloc(uFlags: UINT, dwBytes: SIZE_T) callconv(.winapi) ?HANDLE;
+extern "kernel32" fn GetModuleHandleW(lpModuleName: ?[*:0]const WCHAR) callconv(.winapi) HINSTANCE;
+
+// ---------------------------------------------------------------------------
+// Win32 window/message externs for clipboard subscription.
+// ---------------------------------------------------------------------------
+
+const WNDPROC = *const fn (hwnd: HWND, uMsg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT;
+
+const WNDCLASSEXW = extern struct {
+    cbSize: UINT = @sizeOf(WNDCLASSEXW),
+    style: UINT = 0,
+    lpfnWndProc: WNDPROC,
+    cbClsExtra: c_int = 0,
+    cbWndExtra: c_int = 0,
+    hInstance: HINSTANCE = null,
+    hIcon: HICON = null,
+    hCursor: HCURSOR = null,
+    hbrBackground: HBRUSH = null,
+    lpszMenuName: LPCWSTR = null,
+    lpszClassName: LPCWSTR = null,
+    hIconSm: HICON = null,
+};
+
+const POINT = extern struct {
+    x: c_long,
+    y: c_long,
+};
+
+const MSG = extern struct {
+    hwnd: HWND,
+    message: UINT,
+    wParam: WPARAM,
+    lParam: LPARAM,
+    time: DWORD,
+    pt: POINT,
+};
+
+extern "user32" fn RegisterClassExW(lpWndClass: *const WNDCLASSEXW) callconv(.winapi) u16;
+extern "user32" fn CreateWindowExW(
+    dwExStyle: DWORD,
+    lpClassName: [*:0]const WCHAR,
+    lpWindowName: [*:0]const WCHAR,
+    dwStyle: DWORD,
+    x: c_int,
+    y: c_int,
+    nWidth: c_int,
+    nHeight: c_int,
+    hWndParent: HWND,
+    hMenu: ?*anyopaque,
+    hInstance: HINSTANCE,
+    lpParam: ?*anyopaque,
+) callconv(.winapi) HWND;
+extern "user32" fn DestroyWindow(hWnd: HWND) callconv(.winapi) BOOL;
+extern "user32" fn DefWindowProcW(hWnd: HWND, Msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT;
+extern "user32" fn GetMessageW(lpMsg: *MSG, hWnd: HWND, wMsgFilterMin: UINT, wMsgFilterMax: UINT) callconv(.winapi) BOOL;
+extern "user32" fn TranslateMessage(lpMsg: *const MSG) callconv(.winapi) BOOL;
+extern "user32" fn DispatchMessageW(lpMsg: *const MSG) callconv(.winapi) LRESULT;
+extern "user32" fn PostMessageW(hWnd: HWND, Msg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) BOOL;
+extern "user32" fn AddClipboardFormatListener(hwnd: HWND) callconv(.winapi) BOOL;
+extern "user32" fn RemoveClipboardFormatListener(hwnd: HWND) callconv(.winapi) BOOL;
+
+// ---------------------------------------------------------------------------
+// Win32 constants for subscription.
+// ---------------------------------------------------------------------------
+
+const WM_CLIPBOARDUPDATE: UINT = 0x031D;
+const WM_QUIT: UINT = 0x0012;
+/// HWND_MESSAGE: cast -3 to HWND (message-only window parent).
+const HWND_MESSAGE: HWND = @ptrFromInt(@as(usize, @bitCast(@as(isize, -3))));
 
 // ---------------------------------------------------------------------------
 // GlobalAlloc flags.
@@ -263,17 +340,197 @@ pub fn decodePathsForFormat(
     return try paths.decodeHDrop(allocator, data);
 }
 
+// ---------------------------------------------------------------------------
+// Subscription state — module-level, matching macOS/Linux pattern.
+// ---------------------------------------------------------------------------
+
+const Subscriber = struct {
+    id: u64,
+    callback: SubscribeCallback,
+    userdata: ?*anyopaque,
+};
+
+var subscribe_mutex: std.Thread.Mutex = .{};
+var subscribers: std.ArrayListUnmanaged(Subscriber) = .{};
+var next_subscriber_id: u64 = 1;
+var msg_thread: ?std.Thread = null;
+var should_exit: bool = false;
+var msg_hwnd: HWND = null;
+
+// ---------------------------------------------------------------------------
+// Window procedure — called on the message thread by DispatchMessageW.
+// ---------------------------------------------------------------------------
+
+fn wndProc(hwnd: HWND, uMsg: UINT, wParam: WPARAM, lParam: LPARAM) callconv(.winapi) LRESULT {
+    if (uMsg == WM_CLIPBOARDUPDATE) {
+        // Snapshot subscribers under lock, then invoke outside lock to avoid
+        // deadlocks if a callback calls back into the library.
+        var snapshot: [64]Subscriber = undefined;
+        var count: usize = 0;
+
+        subscribe_mutex.lock();
+        for (subscribers.items) |s| {
+            if (count >= snapshot.len) break;
+            snapshot[count] = s;
+            count += 1;
+        }
+        subscribe_mutex.unlock();
+
+        for (snapshot[0..count]) |s| {
+            s.callback(s.userdata);
+        }
+        return 0;
+    }
+    return DefWindowProcW(hwnd, uMsg, wParam, lParam);
+}
+
+// ---------------------------------------------------------------------------
+// Message thread function — runs a Win32 message loop with a message-only
+// window that receives WM_CLIPBOARDUPDATE via AddClipboardFormatListener.
+// ---------------------------------------------------------------------------
+
+// UTF-16LE class name: "CopycatClipSub\0"
+const wnd_class_name = blk: {
+    const name = "CopycatClipSub";
+    var buf: [name.len + 1]WCHAR = undefined;
+    for (name, 0..) |c, i| {
+        buf[i] = c;
+    }
+    buf[name.len] = 0;
+    break :blk buf;
+};
+
+fn messageThreadFn() void {
+    const hInstance = GetModuleHandleW(null);
+
+    var wc: WNDCLASSEXW = .{
+        .lpfnWndProc = wndProc,
+        .hInstance = hInstance,
+        .lpszClassName = @ptrCast(&wnd_class_name),
+    };
+    wc.cbSize = @sizeOf(WNDCLASSEXW);
+
+    _ = RegisterClassExW(&wc);
+
+    // Empty window name (L"")
+    const empty_name = [_]WCHAR{0};
+
+    const hwnd = CreateWindowExW(
+        0, // dwExStyle
+        @ptrCast(&wnd_class_name), // lpClassName
+        @ptrCast(&empty_name), // lpWindowName
+        0, // dwStyle
+        0, // x
+        0, // y
+        0, // nWidth
+        0, // nHeight
+        HWND_MESSAGE, // hWndParent — message-only window
+        null, // hMenu
+        hInstance, // hInstance
+        null, // lpParam
+    );
+
+    if (hwnd == null) {
+        // Window creation failed — nothing we can do.
+        return;
+    }
+
+    if (AddClipboardFormatListener(hwnd) == 0) {
+        // Failed to register listener — clean up and exit.
+        _ = DestroyWindow(hwnd);
+        return;
+    }
+
+    // Publish the HWND so unsubscribe() can PostMessageW to it.
+    subscribe_mutex.lock();
+    msg_hwnd = hwnd;
+    subscribe_mutex.unlock();
+
+    // Message loop — GetMessageW returns 0 on WM_QUIT, >0 on normal messages,
+    // -1 on error (which we treat as exit).
+    var msg: MSG = undefined;
+    while (true) {
+        const ret = GetMessageW(&msg, null, 0, 0);
+        if (ret == 0 or ret == -1) break; // WM_QUIT or error
+        _ = TranslateMessage(&msg);
+        _ = DispatchMessageW(&msg);
+    }
+
+    // Teardown.
+    _ = RemoveClipboardFormatListener(hwnd);
+    _ = DestroyWindow(hwnd);
+
+    subscribe_mutex.lock();
+    msg_hwnd = null;
+    subscribe_mutex.unlock();
+}
+
+// ---------------------------------------------------------------------------
+// subscribe / unsubscribe — public API.
+// ---------------------------------------------------------------------------
+
 pub fn subscribe(
     allocator: Allocator,
     callback: SubscribeCallback,
     userdata: ?*anyopaque,
 ) !SubscribeHandle {
-    _ = allocator;
-    _ = callback;
-    _ = userdata;
-    return ClipboardError.SubscribeFailed;
+    subscribe_mutex.lock();
+    defer subscribe_mutex.unlock();
+
+    // If a prior teardown left a stale thread handle, join it before reusing
+    // the slot. This handles the subscribe -> unsubscribe -> subscribe
+    // resurrection case.
+    if (msg_thread) |old_thread| {
+        if (should_exit) {
+            subscribe_mutex.unlock();
+            old_thread.join();
+            subscribe_mutex.lock();
+            msg_thread = null;
+        }
+    }
+
+    const id = next_subscriber_id;
+    next_subscriber_id += 1;
+
+    try subscribers.append(allocator, .{
+        .id = id,
+        .callback = callback,
+        .userdata = userdata,
+    });
+
+    // Spawn the message thread on first subscriber (or after a teardown).
+    if (msg_thread == null) {
+        should_exit = false;
+        msg_thread = std.Thread.spawn(.{}, messageThreadFn, .{}) catch {
+            _ = subscribers.pop();
+            next_subscriber_id -= 1;
+            return ClipboardError.SubscribeFailed;
+        };
+    }
+
+    return SubscribeHandle{ .id = id };
 }
 
 pub fn unsubscribe(handle: SubscribeHandle) void {
-    _ = handle;
+    subscribe_mutex.lock();
+    defer subscribe_mutex.unlock();
+
+    // Find and remove the matching entry.
+    var i: usize = 0;
+    while (i < subscribers.items.len) : (i += 1) {
+        if (subscribers.items[i].id == handle.id) {
+            _ = subscribers.swapRemove(i);
+            break;
+        }
+    }
+
+    // Signal the message thread to exit if no subscribers left.
+    // Shutdown is ASYNC — we do NOT join here (matches macOS/Linux pattern).
+    // The next subscribe() is responsible for joining the stale handle.
+    if (subscribers.items.len == 0) {
+        should_exit = true;
+        if (msg_hwnd) |hwnd| {
+            _ = PostMessageW(hwnd, WM_QUIT, 0, 0);
+        }
+    }
 }
