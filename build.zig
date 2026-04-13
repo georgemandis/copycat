@@ -49,7 +49,7 @@ pub fn build(b: *std.Build) void {
         },
     }
 
-    // Shared library (C ABI for Bun FFI)
+    // Shared library (C ABI for Bun FFI and other consumers)
     const lib = b.addLibrary(.{
         .name = "clipboard",
         .linkage = .dynamic,
@@ -63,6 +63,21 @@ pub fn build(b: *std.Build) void {
         }),
     });
     b.installArtifact(lib);
+
+    // Static library for embedding (e.g. Tauri/Rust)
+    const lib_static = b.addLibrary(.{
+        .name = "clipboard",
+        .linkage = .static,
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/lib.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "clipboard", .module = clipboard_mod },
+            },
+        }),
+    });
+    b.installArtifact(lib_static);
 
     // CLI executable
     const exe = b.addExecutable(.{
