@@ -70,6 +70,13 @@ extern "kernel32" fn GlobalUnlock(hMem: HANDLE) callconv(.winapi) BOOL;
 extern "kernel32" fn GlobalSize(hMem: HANDLE) callconv(.winapi) SIZE_T;
 extern "kernel32" fn GlobalAlloc(uFlags: UINT, dwBytes: SIZE_T) callconv(.winapi) ?HANDLE;
 extern "kernel32" fn GetModuleHandleW(lpModuleName: ?[*:0]const WCHAR) callconv(.winapi) HINSTANCE;
+extern "user32" fn GetClipboardOwner() callconv(.winapi) HWND;
+extern "user32" fn GetWindowThreadProcessId(hWnd: ?*anyopaque, lpdwProcessId: *DWORD) callconv(.winapi) DWORD;
+extern "kernel32" fn OpenProcess(dwDesiredAccess: DWORD, bInheritHandle: BOOL, dwProcessId: DWORD) callconv(.winapi) ?HANDLE;
+extern "kernel32" fn CloseHandle(hObject: HANDLE) callconv(.winapi) BOOL;
+extern "kernel32" fn K32GetModuleBaseNameW(hProcess: HANDLE, hModule: ?*anyopaque, lpBaseName: [*]WCHAR, nSize: DWORD) callconv(.winapi) DWORD;
+
+const PROCESS_QUERY_LIMITED_INFORMATION: DWORD = 0x1000;
 
 // ---------------------------------------------------------------------------
 // Win32 window/message externs for clipboard subscription.
@@ -537,9 +544,73 @@ pub fn unsubscribe(handle: SubscribeHandle) void {
 
 pub fn getSourceInfo() @import("../clipboard.zig").ClipboardSourceInfo {
     const ClipboardSourceInfo = @import("../clipboard.zig").ClipboardSourceInfo;
+    const alloc = std.heap.c_allocator;
+
+    const owner_hwnd = GetClipboardOwner();
+    if (owner_hwnd == null) {
+        return ClipboardSourceInfo{
+            .pid = -1,
+            .name = null,
+            .status = 1,
+        };
+    }
+
+    var pid: DWORD = 0;
+    _ = GetWindowThreadProcessId(owner_hwnd, &pid);
+    if (pid == 0) {
+        return ClipboardSourceInfo{
+            .pid = -1,
+            .name = null,
+            .status = -1,
+        };
+    }
+
+    const process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+    if (process == null) {
+        return ClipboardSourceInfo{
+            .pid = @intCast(pid),
+            .name = null,
+            .status = 0,
+        };
+    }
+    defer _ = CloseHandle(process.?);
+
+    var name_buf: [260]WCHAR = undefined;
+    const name_len = K32GetModuleBaseNameW(process.?, null, &name_buf, 260);
+
+    if (name_len == 0) {
+        return ClipboardSourceInfo{
+            .pid = @intCast(pid),
+            .name = null,
+            .status = 0,
+        };
+    }
+
+    // Convert UTF-16LE to UTF-8 using the same pattern as existing codebase
+    const utf16_slice = name_buf[0..name_len];
+    const utf8_owned = std.unicode.utf16LeToUtf8Alloc(alloc, utf16_slice) catch {
+        return ClipboardSourceInfo{
+            .pid = @intCast(pid),
+            .name = null,
+            .status = 0,
+        };
+    };
+
+    // Re-allocate as sentinel-terminated for FFI (null-terminated C string)
+    const utf8_sentinel = alloc.allocSentinel(u8, utf8_owned.len, 0) catch {
+        alloc.free(utf8_owned);
+        return ClipboardSourceInfo{
+            .pid = @intCast(pid),
+            .name = null,
+            .status = 0,
+        };
+    };
+    @memcpy(utf8_sentinel[0..utf8_owned.len], utf8_owned);
+    alloc.free(utf8_owned);
+
     return ClipboardSourceInfo{
-        .pid = -1,
-        .name = null,
-        .status = 1,
+        .pid = @intCast(pid),
+        .name = utf8_sentinel.ptr,
+        .status = 0,
     };
 }
