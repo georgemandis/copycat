@@ -116,6 +116,9 @@ fn printUsage(writer: *std.io.Writer) !void {
         \\  --json                          Output as JSON (introspect, list)
         \\  --help, -h                      Show this help message
         \\
+        \\Created by George Mandis <george@mand.is>
+        \\https://github.com/georgemandis/copycat
+        \\
     , .{});
 }
 
