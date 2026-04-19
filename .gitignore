@@ -1,3 +1,8 @@
 .DS_Store
 .zig-cache
 zig-out
+docs/superpowers/
+docs/specs/
+docs/plans/
+NOTES-*.md
+*.txt

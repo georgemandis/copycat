@@ -51,7 +51,7 @@ pub fn build(b: *std.Build) void {
 
     // Shared library (C ABI for Bun FFI and other consumers)
     const lib = b.addLibrary(.{
-        .name = "clipboard",
+        .name = "copycat",
         .linkage = .dynamic,
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/lib.zig"),
@@ -66,7 +66,7 @@ pub fn build(b: *std.Build) void {
 
     // Static library for embedding (e.g. Tauri/Rust)
     const lib_static = b.addLibrary(.{
-        .name = "clipboard",
+        .name = "copycat",
         .linkage = .static,
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/lib.zig"),
@@ -81,7 +81,7 @@ pub fn build(b: *std.Build) void {
 
     // CLI executable
     const exe = b.addExecutable(.{
-        .name = "clipboard",
+        .name = "copycat",
         .root_module = b.createModule(.{
             .root_source_file = b.path("src/main.zig"),
             .target = target,
@@ -100,7 +100,7 @@ pub fn build(b: *std.Build) void {
         run_cmd.addArgs(args);
     }
 
-    const run_step = b.step("run", "Run the clipboard CLI");
+    const run_step = b.step("run", "Run the copycat CLI");
     run_step.dependOn(&run_cmd.step);
 
     // -------------------------------------------------------------------

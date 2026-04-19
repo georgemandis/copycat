@@ -1,4 +1,4 @@
-# clipboard
+# copycat
 
 A standalone, generic clipboard library and CLI tool written in Zig. Reads and writes **arbitrary** clipboard formats by their native identifier (UTI on macOS, MIME type on Linux, format ID on Windows) — not just text and images.
 
@@ -26,15 +26,15 @@ zig build
 
 This produces two artifacts:
 
-- `zig-out/bin/clipboard` — the CLI executable
-- `zig-out/lib/libclipboard.dylib` — the C ABI shared library
+- `zig-out/bin/copycat` — the CLI executable
+- `zig-out/lib/libcopycat.dylib` — the C ABI shared library
 
 ## CLI Usage
 
-Running `clipboard` with no arguments prints a formatted overview of everything currently on the clipboard:
+Running `copycat` with no arguments prints a formatted overview of everything currently on the clipboard:
 
 ```
-$ clipboard
+$ copycat
 Clipboard contents (3 formats, changeCount: 142):
 
   public.utf8-plain-text    28 bytes
@@ -51,16 +51,16 @@ Clipboard contents (3 formats, changeCount: 142):
 
 | Command | Description |
 |---------|-------------|
-| `clipboard` | Show clipboard contents (default) |
-| `clipboard list` | List format names, one per line |
-| `clipboard read <format>` | Read raw bytes for `<format>` to stdout |
-| `clipboard read <format> --out <file>` | Write raw bytes to a file |
-| `clipboard write <format>` | Read data from stdin, write to clipboard |
-| `clipboard write <format> --data "text"` | Write inline string data |
-| `clipboard clear` | Clear the clipboard |
-| `clipboard watch` | Print on every clipboard change (default 500ms poll) |
-| `clipboard watch --interval <ms>` | Poll with custom interval |
-| `clipboard help`, `--help`, `-h` | Show usage |
+| `copycat` | Show clipboard contents (default) |
+| `copycat list` | List format names, one per line |
+| `copycat read <format>` | Read raw bytes for `<format>` to stdout |
+| `copycat read <format> --out <file>` | Write raw bytes to a file |
+| `copycat write <format>` | Read data from stdin, write to clipboard |
+| `copycat write <format> --data "text"` | Write inline string data |
+| `copycat clear` | Clear the clipboard |
+| `copycat watch` | Print on every clipboard change (default 500ms poll) |
+| `copycat watch --interval <ms>` | Poll with custom interval |
+| `copycat help`, `--help`, `-h` | Show usage |
 
 ### Global flags
 
@@ -68,20 +68,20 @@ Clipboard contents (3 formats, changeCount: 142):
 
 ### Shell completions
 
-Completion scripts for fish, bash, and zsh live in `completions/`. They include dynamic completion for format identifiers: typing `clipboard read <TAB>` will complete against whatever is currently on your clipboard (by shelling out to `clipboard list`).
+Completion scripts for fish, bash, and zsh live in `completions/`. They include dynamic completion for format identifiers: typing `copycat read <TAB>` will complete against whatever is currently on your clipboard (by shelling out to `copycat list`).
 
-> **Note:** Dynamic format completion requires `clipboard` to be on your `$PATH`. After `zig build`, either copy or symlink `zig-out/bin/clipboard` into a directory on `$PATH` (e.g. `~/.local/bin`).
+> **Note:** Dynamic format completion requires `copycat` to be on your `$PATH`. After `zig build`, either copy or symlink `zig-out/bin/copycat` into a directory on `$PATH` (e.g. `~/.local/bin`).
 
 ```sh
 # fish
-cp completions/clipboard.fish ~/.config/fish/completions/
+cp completions/copycat.fish ~/.config/fish/completions/
 
 # bash (user)
-echo "source $PWD/completions/clipboard.bash" >> ~/.bashrc
+echo "source $PWD/completions/copycat.bash" >> ~/.bashrc
 
-# zsh — place _clipboard on your $fpath, e.g.:
+# zsh — place _copycat on your $fpath, e.g.:
 mkdir -p ~/.zfunc
-cp completions/_clipboard ~/.zfunc/
+cp completions/_copycat ~/.zfunc/
 # then ensure ~/.zshrc has: fpath=(~/.zfunc $fpath) && autoload -Uz compinit && compinit
 ```
 
@@ -89,18 +89,18 @@ cp completions/_clipboard ~/.zfunc/
 
 ```sh
 # Save HTML from clipboard to a file
-clipboard read public.html > page.html
+copycat read public.html > page.html
 
 # Copy a file's contents to clipboard as HTML
-cat page.html | clipboard write public.html
+cat page.html | copycat write public.html
 
 # Find the format you want
-clipboard list | grep html
+copycat list | grep html
 
 # Diff what an app puts on the clipboard between two states
-clipboard --json > before.json
+copycat --json > before.json
 # ... do the thing ...
-clipboard --json > after.json
+copycat --json > after.json
 diff before.json after.json
 ```
 
@@ -153,7 +153,7 @@ void clipboard_free(void* ptr);
 ```ts
 import { dlopen, FFIType, suffix } from "bun:ffi";
 
-const lib = dlopen(`./zig-out/lib/libclipboard.${suffix}`, {
+const lib = dlopen(`./zig-out/lib/libcopycat.${suffix}`, {
   clipboard_list_formats: { args: [], returns: FFIType.cstring },
   clipboard_change_count: { args: [], returns: FFIType.i64 },
   clipboard_free: { args: [FFIType.ptr], returns: FFIType.void },
@@ -203,7 +203,7 @@ On macOS, formats are [Uniform Type Identifiers](https://developer.apple.com/doc
 | TIFF | `public.tiff` |
 | File URL | `public.file-url` |
 
-Apps may also register custom UTIs (e.g. `com.google.docs.clipboard`, `com.adobe.photoshop.image`). Use `clipboard list` to see what's actually on the clipboard at any moment.
+Apps may also register custom UTIs (e.g. `com.google.docs.clipboard`, `com.adobe.photoshop.image`). Use `copycat list` to see what's actually on the clipboard at any moment.
 
 ## Roadmap
 

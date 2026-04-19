@@ -1,10 +1,10 @@
-# Bash completions for `clipboard`
+# Bash completions for `copycat`
 #
 # Install:
-#   - System-wide: cp completions/clipboard.bash /etc/bash_completion.d/clipboard
-#   - User:        source /path/to/completions/clipboard.bash  (add to ~/.bashrc)
+#   - System-wide: cp completions/copycat.bash /etc/bash_completion.d/copycat
+#   - User:        source /path/to/completions/copycat.bash  (add to ~/.bashrc)
 
-_clipboard() {
+_copycat() {
     local cur prev words cword
     if declare -F _init_completion >/dev/null; then
         _init_completion || return
@@ -53,7 +53,7 @@ _clipboard() {
 
     case "$subcmd" in
         read|write)
-            # Complete the format argument from `clipboard list`
+            # Complete the format argument from `copycat list`
             local prev_non_flag_count=0 j
             for (( j=1; j < cword; j++ )); do
                 case "${words[j]}" in
@@ -70,7 +70,7 @@ _clipboard() {
             # next positional, so complete formats when count == 1 (just the subcmd)
             if [[ $prev_non_flag_count -eq 1 && "$cur" != -* ]]; then
                 local formats
-                formats=$(clipboard list 2>/dev/null)
+                formats=$(copycat list 2>/dev/null)
                 COMPREPLY=( $(compgen -W "$formats" -- "$cur") )
                 return
             fi
@@ -91,4 +91,4 @@ _clipboard() {
     esac
 }
 
-complete -F _clipboard clipboard
+complete -F _copycat copycat

@@ -100,7 +100,7 @@ pub fn main() !void {
 
 fn printUsage(writer: *std.io.Writer) !void {
     try writer.print(
-        \\Usage: clipboard [command] [options]
+        \\Usage: copycat [command] [options]
         \\
         \\Commands:
         \\  (none)                          Show clipboard contents (default)
@@ -263,7 +263,7 @@ fn cmdRead(allocator: Allocator, args: []const []const u8) !void {
         const stderr_file = std.fs.File.stderr();
         var errbuf: [4096]u8 = undefined;
         var ew = stderr_file.writer(&errbuf);
-        try ew.interface.print("Usage: clipboard read <format> [--out <file>] [--as-path [-0]]\n", .{});
+        try ew.interface.print("Usage: copycat read <format> [--out <file>] [--as-path [-0]]\n", .{});
         try ew.interface.flush();
         std.process.exit(1);
     }
@@ -386,7 +386,7 @@ fn cmdWrite(allocator: Allocator, args: []const []const u8) !void {
         const stderr_file = std.fs.File.stderr();
         var errbuf: [4096]u8 = undefined;
         var ew = stderr_file.writer(&errbuf);
-        try ew.interface.print("Usage: clipboard write <format> [--data \"text\"]\n", .{});
+        try ew.interface.print("Usage: copycat write <format> [--data \"text\"]\n", .{});
         try ew.interface.flush();
         std.process.exit(1);
     }
