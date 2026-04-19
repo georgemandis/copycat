@@ -125,9 +125,10 @@ pub fn unsubscribe(handle: SubscribeHandle) void {
 
 pub fn getSourceInfo() @import("../../clipboard.zig").ClipboardSourceInfo {
     const ClipboardSourceInfo = @import("../../clipboard.zig").ClipboardSourceInfo;
+    if (x11_ready) return x11.getSourceInfo();
     return ClipboardSourceInfo{
         .pid = -1,
         .name = null,
-        .status = 1,
+        .status = -1,
     };
 }

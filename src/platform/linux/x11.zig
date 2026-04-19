@@ -649,3 +649,109 @@ pub fn unsubscribe(handle: mod.SubscribeHandle) void {
     // subscriber leaves. Process exit is the only stop signal. See the
     // design doc's "Subscribe lifetime" section.
 }
+
+// ---------------------------------------------------------------------------
+// getSourceInfo — query clipboard owner PID and process name
+// ---------------------------------------------------------------------------
+
+pub fn getSourceInfo() @import("../../clipboard.zig").ClipboardSourceInfo {
+    const ClipboardSourceInfo = @import("../../clipboard.zig").ClipboardSourceInfo;
+    const alloc = std.heap.c_allocator;
+
+    const d = display orelse return ClipboardSourceInfo{
+        .pid = -1,
+        .name = null,
+        .status = -1,
+    };
+
+    const owner = c.XGetSelectionOwner(d, clipboard_atom);
+    if (owner == c.None) {
+        return ClipboardSourceInfo{
+            .pid = -1,
+            .name = null,
+            .status = 1,
+        };
+    }
+
+    // Query _NET_WM_PID property on the owner window
+    const net_wm_pid_atom = c.XInternAtom(d, "_NET_WM_PID", c.True);
+    if (net_wm_pid_atom == c.None) {
+        return ClipboardSourceInfo{
+            .pid = -1,
+            .name = null,
+            .status = -1,
+        };
+    }
+
+    var actual_type: c.Atom = undefined;
+    var actual_format: c_int = undefined;
+    var n_items: c_ulong = undefined;
+    var bytes_after: c_ulong = undefined;
+    var prop_data: ?[*]u8 = null;
+
+    const result = c.XGetWindowProperty(
+        d,
+        owner,
+        net_wm_pid_atom,
+        0,       // offset
+        1,       // length (1 x 32-bit word)
+        c.False, // delete
+        c.XA_CARDINAL,
+        &actual_type,
+        &actual_format,
+        &n_items,
+        &bytes_after,
+        @ptrCast(&prop_data),
+    );
+
+    if (result != c.Success or prop_data == null or n_items == 0) {
+        if (prop_data) |p| _ = c.XFree(p);
+        return ClipboardSourceInfo{
+            .pid = -1,
+            .name = null,
+            .status = -1,
+        };
+    }
+
+    const pid_ptr: *const u32 = @ptrCast(@alignCast(prop_data.?));
+    const pid: i64 = @intCast(pid_ptr.*);
+    _ = c.XFree(prop_data.?);
+
+    // Read /proc/{pid}/comm for process name
+    var path_buf: [64]u8 = undefined;
+    const path = std.fmt.bufPrint(&path_buf, "/proc/{d}/comm", .{pid}) catch {
+        return ClipboardSourceInfo{ .pid = pid, .name = null, .status = 0 };
+    };
+
+    const file = std.fs.openFileAbsolute(path, .{}) catch {
+        return ClipboardSourceInfo{ .pid = pid, .name = null, .status = 0 };
+    };
+    defer file.close();
+
+    var name_buf: [256]u8 = undefined;
+    const bytes_read = file.read(&name_buf) catch {
+        return ClipboardSourceInfo{ .pid = pid, .name = null, .status = 0 };
+    };
+
+    if (bytes_read == 0) {
+        return ClipboardSourceInfo{ .pid = pid, .name = null, .status = 0 };
+    }
+
+    // Trim trailing newline
+    var name_len = bytes_read;
+    if (name_len > 0 and name_buf[name_len - 1] == '\n') {
+        name_len -= 1;
+    }
+
+    // Heap-allocate null-terminated copy for FFI
+    const name_copy = alloc.allocSentinel(u8, name_len, 0) catch {
+        return ClipboardSourceInfo{ .pid = pid, .name = null, .status = 0 };
+    };
+    @memcpy(name_copy[0..name_len], name_buf[0..name_len]);
+
+    return ClipboardSourceInfo{
+        .pid = pid,
+        .name = name_copy.ptr,
+        .status = 0,
+    };
+}
