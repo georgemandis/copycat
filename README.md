@@ -1,16 +1,45 @@
 # copycat
 
-A standalone, generic clipboard library and CLI tool written in Zig. Reads and writes **arbitrary** clipboard formats by their native identifier (UTI on macOS, MIME type on Linux, format ID on Windows) — not just text and images.
+[![Build](https://github.com/georgemandis/copycat/actions/workflows/release.yml/badge.svg)](https://github.com/georgemandis/copycat/actions/workflows/release.yml)
 
-Ships as both a CLI executable and a C ABI shared library, so it's usable directly from a shell or via FFI from any language that can load a `.dylib` (Bun, Node, Python, Rust, etc.).
+A cross-platform clipboard CLI and library written in Zig. Reads and writes **arbitrary** clipboard formats by their native identifier (UTI on macOS, MIME type on Linux, format ID on Windows) — not just text and images.
+
+Ships as both a CLI executable and a C ABI shared library, so it's usable directly from a shell or via FFI from any language that can load a shared library (Bun, Node, Python, Rust, etc.).
+
+## Install
+
+### Homebrew (macOS / Linux)
+
+```bash
+brew install georgemandis/tap/copycat
+```
+
+### Scoop (Windows)
+
+```powershell
+scoop bucket add georgemandis https://github.com/georgemandis/scoop-bucket
+scoop install georgemandis/copycat
+```
+
+### Debian / Ubuntu
+
+```bash
+# Download the .deb for your architecture (amd64 or arm64)
+curl -LO https://github.com/georgemandis/copycat/releases/download/v0.1.0/copycat_0.1.0_amd64.deb
+sudo dpkg -i copycat_0.1.0_amd64.deb
+```
+
+### Pre-built binaries
+
+Download the latest release from [GitHub Releases](https://github.com/georgemandis/copycat/releases). Archives are available for macOS (aarch64, x86_64), Linux (aarch64, x86_64), and Windows (x86_64).
 
 ## Status
 
 | Platform | Status |
 |----------|--------|
 | macOS    | ✅ Implemented (NSPasteboard via Objective-C runtime) |
-| Windows  | 🚧 Planned |
-| Linux    | 🚧 Planned (X11 + Wayland) |
+| Windows  | ✅ Implemented (Win32 clipboard API) |
+| Linux    | ✅ Implemented (X11 + Wayland via wlr-data-control) |
 
 Built and tested against **Zig 0.15.2**.
 
@@ -18,7 +47,9 @@ Built and tested against **Zig 0.15.2**.
 
 Most clipboard libraries expose a fixed set of types — text, image, files. But the system clipboard is actually a generic key-value store: applications routinely put a dozen representations of the same data on it (plain text, RTF, HTML, app-specific binary formats like Google Docs' `com.google.docs.clipboard`, etc.). This library treats the clipboard as what it is: a map from format identifiers to raw bytes, which you can list, read, and write directly.
 
-## Build
+## Building from source
+
+Zig 0.15.2 required.
 
 ```sh
 zig build
@@ -27,7 +58,9 @@ zig build
 This produces two artifacts:
 
 - `zig-out/bin/copycat` — the CLI executable
-- `zig-out/lib/libcopycat.dylib` — the C ABI shared library
+- `zig-out/lib/libcopycat.dylib` (macOS) / `.so` (Linux) / `.dll` (Windows) — the C ABI shared library
+
+Building from source is the recommended path if you want the shared library for FFI use. The package manager installs (Homebrew, Scoop, .deb) include only the CLI binary.
 
 ## CLI Usage
 
@@ -289,16 +322,21 @@ src/
 ├── lib.zig               # C ABI exports for the shared library
 ├── main.zig              # CLI entry point
 ├── objc.zig              # Objective-C runtime helpers (msgSend, NSString/NSData/NSArray bridging)
+├── paths.zig             # File URL / path decoding (pure Zig, no OS deps)
 └── platform/
-    └── macos.zig         # NSPasteboard backend
+    ├── macos.zig         # NSPasteboard backend
+    ├── windows.zig       # Win32 clipboard API backend
+    └── linux/
+        ├── mod.zig       # Linux dispatcher (X11 vs Wayland)
+        └── x11.zig       # X11 selections backend
 completions/              # Shell completions (fish, bash, zsh)
 examples/
 ├── bun-ffi.ts            # Bun FFI example (list, read, write)
 └── node-ffi.mjs          # Node.js FFI example (using koffi)
-build.zig                 # Builds both the CLI executable and the .dylib
+build.zig                 # Builds both the CLI executable and the shared library
 ```
 
-The platform backend is selected at compile time via `builtin.os.tag`. Adding a new platform means dropping in `platform/windows.zig` or `platform/linux.zig` and adding a switch arm in `clipboard.zig`.
+The platform backend is selected at compile time via `builtin.os.tag`.
 
 ### Architecture
 
@@ -328,9 +366,10 @@ Apps may also register custom UTIs (e.g. `com.google.docs.clipboard`, `com.adobe
 ## Roadmap
 
 - [x] macOS backend (NSPasteboard)
+- [x] Windows backend (Win32 clipboard API)
+- [x] Linux backend (X11 + Wayland via wlr-data-control)
 - [x] CLI tool with introspection, list, read, write, clear, watch
 - [x] C ABI shared library
-- [ ] Windows backend (`OpenClipboard` / `EnumClipboardFormats` / `GetClipboardData`)
-- [ ] Linux backend (X11 selections + Wayland data-device)
+- [x] Bun and Node.js FFI examples
 - [ ] Multi-item clipboard support (currently reads only the first item)
 - [ ] Image format conversion helpers (e.g. TIFF ↔ PNG on macOS)
