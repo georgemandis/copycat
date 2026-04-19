@@ -244,7 +244,42 @@ console.log("After write:", readFormat("public.utf8-plain-text")?.toString());
 
 The `_ex` variant of `clipboard_read_format` uses out-pointers instead of returning a struct, which is more compatible with Bun's FFI. The regular `clipboard_read_format` returns a struct by value and works better with languages that support that calling convention (C, Rust, etc.).
 
-A runnable version of this example lives at [`examples/bun-ffi.ts`](examples/bun-ffi.ts). Build the library first with `zig build`, then run it with `bun run examples/bun-ffi.ts`.
+### Node.js FFI example
+
+Node.js doesn't have built-in FFI, but [koffi](https://koffi.dev/) makes it straightforward (`npm install koffi` — no C compiler needed):
+
+```js
+import koffi from "koffi";
+
+const lib = koffi.load("./zig-out/lib/libcopycat.dylib");
+
+const clipboard_list_formats = lib.func("clipboard_list_formats", "str", []);
+const clipboard_write_format = lib.func("clipboard_write_format", "int32", [
+  "str", "const void *", "uint64",
+]);
+const clipboard_change_count = lib.func("clipboard_change_count", "int64", []);
+
+// List formats
+const formats = JSON.parse(clipboard_list_formats());
+console.log(formats); // ["public.utf8-plain-text", "public.html", ...]
+
+// Write text
+const msg = Buffer.from("Hello from Node!");
+clipboard_write_format("public.utf8-plain-text", msg, msg.length);
+```
+
+### Runnable examples
+
+Complete, runnable versions of both examples live in [`examples/`](examples/):
+
+```sh
+zig build                              # build the shared library first
+
+bun run examples/bun-ffi.ts            # Bun (built-in FFI, zero deps)
+
+npm install koffi                      # Node.js (install koffi first)
+node examples/node-ffi.mjs
+```
 
 ## Project Structure
 
@@ -258,7 +293,8 @@ src/
     └── macos.zig         # NSPasteboard backend
 completions/              # Shell completions (fish, bash, zsh)
 examples/
-└── bun-ffi.ts            # Bun FFI example (list, read, write)
+├── bun-ffi.ts            # Bun FFI example (list, read, write)
+└── node-ffi.mjs          # Node.js FFI example (using koffi)
 build.zig                 # Builds both the CLI executable and the .dylib
 ```
 

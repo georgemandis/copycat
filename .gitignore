@@ -6,3 +6,4 @@ docs/specs/
 docs/plans/
 NOTES-*.md
 *.txt
+node_modules/
