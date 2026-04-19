@@ -14,6 +14,16 @@ pub const ClipboardError = platform.ClipboardError;
 pub const SubscribeCallback = platform.SubscribeCallback;
 pub const SubscribeHandle = platform.SubscribeHandle;
 
+/// Information about the application that last placed content on the clipboard.
+/// status == 0:  success — pid and name are populated.
+/// status == 1:  not implemented on this platform (stub/no-op).
+/// status == -1: error retrieving source info.
+pub const ClipboardSourceInfo = extern struct {
+    pid: i64,
+    name: ?[*:0]const u8,
+    status: i32,
+};
+
 pub fn listFormats(allocator: Allocator) ![][]const u8 {
     return platform.listFormats(allocator);
 }
@@ -36,6 +46,10 @@ pub fn clear() !void {
 
 pub fn getChangeCount() i64 {
     return platform.getChangeCount();
+}
+
+pub fn getSourceInfo() ClipboardSourceInfo {
+    return platform.getSourceInfo();
 }
 
 /// Decodes a file-reference pasteboard format (e.g. `public.file-url`,

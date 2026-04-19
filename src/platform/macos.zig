@@ -457,6 +457,19 @@ fn fanout() void {
 }
 
 // ---------------------------------------------------------------------------
+// Source info (no-op stub — macOS implementation deferred)
+// ---------------------------------------------------------------------------
+
+pub fn getSourceInfo() @import("../clipboard.zig").ClipboardSourceInfo {
+    const ClipboardSourceInfo = @import("../clipboard.zig").ClipboardSourceInfo;
+    return ClipboardSourceInfo{
+        .pid = -1,
+        .name = null,
+        .status = 1,
+    };
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 // Note: these tests only exercise the registry — they do not touch the

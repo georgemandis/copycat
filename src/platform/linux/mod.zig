@@ -122,3 +122,12 @@ pub fn unsubscribe(handle: SubscribeHandle) void {
         return;
     }
 }
+
+pub fn getSourceInfo() @import("../../clipboard.zig").ClipboardSourceInfo {
+    const ClipboardSourceInfo = @import("../../clipboard.zig").ClipboardSourceInfo;
+    return ClipboardSourceInfo{
+        .pid = -1,
+        .name = null,
+        .status = 1,
+    };
+}

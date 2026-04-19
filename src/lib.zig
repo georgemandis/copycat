@@ -22,6 +22,13 @@ pub const ClipboardFormatPair = extern struct {
     len: usize,
 };
 
+/// Information about the application that last placed content on the clipboard.
+/// status == 0:  success — pid >= 0 and name is a non-null heap-allocated string.
+///               The caller MUST free name with clipboard_free().
+/// status == 1:  not implemented on this platform (no-op stub). pid == -1, name == null.
+/// status == -1: error retrieving source info. pid == -1, name == null.
+pub const ClipboardSourceInfo = clipboard.ClipboardSourceInfo;
+
 /// Build a slice from an FFI (pointer, length) pair, treating zero-length as
 /// an empty slice without dereferencing the pointer. C callers commonly pass
 /// a null or undefined pointer alongside len == 0; this guards against that.
@@ -185,6 +192,17 @@ export fn clipboard_change_count() i64 {
     return clipboard.getChangeCount();
 }
 
+/// Returns information about the application that last placed content on the
+/// clipboard. On platforms where this is not yet implemented (macOS stub,
+/// Linux, Windows stubs), status == 1 and pid/name are unset.
+///
+/// When status == 0 (success): name is a null-terminated heap-allocated string
+/// that the caller MUST free with clipboard_free().
+/// When status != 0: name is null and must NOT be freed.
+export fn clipboard_get_source_info() ClipboardSourceInfo {
+    return clipboard.getSourceInfo();
+}
+
 /// Decode file-reference clipboard formats into filesystem paths.
 /// Returns a JSON array of path strings via out_json.
 /// Status codes: 0=success, 1=format not found, 2=unsupported format, -1=error
@@ -291,11 +309,26 @@ export fn clipboard_decode_paths_for_format(
 ///   - the string returned by clipboard_list_formats()
 ///   - the .data field of a ClipboardData with status == 0 from clipboard_read_format()
 ///   - the out_data pointer written by clipboard_read_format_ex() with out_status == 0
+///   - the .name field of a ClipboardSourceInfo with status == 0 from clipboard_get_source_info()
 /// Safe to call with null. Do NOT call on pointers from any other source —
 /// doing so is undefined behavior.
 export fn clipboard_free(ptr: ?*anyopaque) void {
     // c_allocator delegates to malloc/free, so we can free by raw pointer.
     if (ptr) |p| {
         std.c.free(p);
+    }
+}
+
+test "clipboard_get_source_info returns valid struct" {
+    const info = clipboard_get_source_info();
+    // On macOS stub and other no-op platforms: status == 1
+    // On a fully implemented platform: status == 0
+    try std.testing.expect(info.status == 0 or info.status == 1);
+    if (info.status == 0) {
+        try std.testing.expect(info.pid >= 0);
+        try std.testing.expect(info.name != null);
+        if (info.name) |n| {
+            std.c.free(@constCast(@ptrCast(n)));
+        }
     }
 }
