@@ -12,6 +12,18 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    // When cross-compiling for macOS (e.g. -Dtarget=x86_64-macos on an aarch64
+    // host), Zig doesn't auto-discover the SDK paths. Pass -Dmacos-sdk=/path/to/sdk
+    // to provide them.
+    const is_native = target.query.isNativeOs() and target.query.isNativeCpu();
+    if (!is_native and target_os == .macos) {
+        const macos_sdk = b.option([]const u8, "macos-sdk", "Path to macOS SDK for cross-compilation");
+        if (macos_sdk) |sdk| {
+            clipboard_mod.addLibraryPath(.{ .cwd_relative = b.fmt("{s}/usr/lib", .{sdk}) });
+            clipboard_mod.addFrameworkPath(.{ .cwd_relative = b.fmt("{s}/System/Library/Frameworks", .{sdk}) });
+        }
+    }
+
     switch (target_os) {
         .macos => {
             clipboard_mod.linkSystemLibrary("objc", .{});

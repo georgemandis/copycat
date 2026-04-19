@@ -1,0 +1,171 @@
+name: Build and Release
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+    paths-ignore:
+      - '*.md'
+      - 'docs/**'
+      - 'LICENSE'
+
+permissions:
+  contents: write
+
+jobs:
+  build-macos:
+    runs-on: macos-latest
+    strategy:
+      matrix:
+        include:
+          - target: ''
+            archive_suffix: macos-aarch64
+          - target: x86_64-macos
+            archive_suffix: macos-x86_64
+            build_flags: '-Dmacos-sdk=/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs/MacOSX.sdk'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+
+      - name: Build
+        run: |
+          rm -rf zig-out
+          if [ -n "${{ matrix.target }}" ]; then
+            zig build -Dtarget=${{ matrix.target }} ${{ matrix.build_flags }}
+          else
+            zig build
+          fi
+
+      - name: Package archive
+        run: |
+          VERSION="${{ github.ref_type == 'tag' && github.ref_name || format('dev-{0}', github.sha) }}"
+          ARCHIVE_DIR="copycat-${VERSION}-${{ matrix.archive_suffix }}"
+          mkdir -p "${ARCHIVE_DIR}"
+          cp zig-out/bin/copycat "${ARCHIVE_DIR}/"
+          cp zig-out/lib/libcopycat.dylib "${ARCHIVE_DIR}/"
+          tar czf "${ARCHIVE_DIR}.tar.gz" "${ARCHIVE_DIR}"
+          echo "ARCHIVE=${ARCHIVE_DIR}.tar.gz" >> "$GITHUB_ENV"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: copycat-${{ matrix.archive_suffix }}
+          path: ${{ env.ARCHIVE }}
+
+  build-linux:
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      matrix:
+        include:
+          - runner: ubuntu-latest
+            archive_suffix: linux-x86_64
+            deb_arch: amd64
+          - runner: ubuntu-24.04-arm
+            archive_suffix: linux-aarch64
+            deb_arch: arm64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y libx11-dev libwayland-dev libwayland-bin
+
+      - name: Build
+        run: |
+          rm -rf zig-out
+          zig build
+
+      - name: Package archive
+        run: |
+          VERSION="${{ github.ref_type == 'tag' && github.ref_name || format('dev-{0}', github.sha) }}"
+          ARCHIVE_DIR="copycat-${VERSION}-${{ matrix.archive_suffix }}"
+          mkdir -p "${ARCHIVE_DIR}"
+          cp zig-out/bin/copycat "${ARCHIVE_DIR}/"
+          cp zig-out/lib/libcopycat.so "${ARCHIVE_DIR}/"
+          tar czf "${ARCHIVE_DIR}.tar.gz" "${ARCHIVE_DIR}"
+          echo "ARCHIVE=${ARCHIVE_DIR}.tar.gz" >> "$GITHUB_ENV"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: copycat-${{ matrix.archive_suffix }}
+          path: ${{ env.ARCHIVE }}
+
+      - name: Package .deb
+        if: github.ref_type == 'tag'
+        run: |
+          DEB_VERSION="${{ github.ref_name }}"
+          DEB_VERSION="${DEB_VERSION#v}"
+          DEB_NAME="copycat_${DEB_VERSION}_${{ matrix.deb_arch }}"
+          mkdir -p "${DEB_NAME}/DEBIAN"
+          mkdir -p "${DEB_NAME}/usr/bin"
+          mkdir -p "${DEB_NAME}/usr/lib"
+          cat > "${DEB_NAME}/DEBIAN/control" <<EOF
+          Package: copycat
+          Version: ${DEB_VERSION}
+          Architecture: ${{ matrix.deb_arch }}
+          Maintainer: George Mandis <george@mand.is>
+          Description: A cross-platform clipboard CLI and C ABI library written in Zig
+          Homepage: https://github.com/georgemandis/copycat
+          Depends: libx11-6, libwayland-client0
+          Section: utils
+          Priority: optional
+          EOF
+          install -m 755 zig-out/bin/copycat "${DEB_NAME}/usr/bin/copycat"
+          install -m 644 zig-out/lib/libcopycat.so "${DEB_NAME}/usr/lib/libcopycat.so"
+          dpkg-deb --root-owner-group --build "${DEB_NAME}"
+          echo "DEB=${DEB_NAME}.deb" >> "$GITHUB_ENV"
+
+      - name: Upload .deb artifact
+        if: github.ref_type == 'tag'
+        uses: actions/upload-artifact@v4
+        with:
+          name: copycat-deb-${{ matrix.deb_arch }}
+          path: ${{ env.DEB }}
+
+  build-windows:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+
+      - name: Build
+        run: |
+          rm -rf zig-out
+          zig build -Dtarget=x86_64-windows
+
+      - name: Package archive
+        run: |
+          VERSION="${{ github.ref_type == 'tag' && github.ref_name || format('dev-{0}', github.sha) }}"
+          ARCHIVE_DIR="copycat-${VERSION}-windows-x86_64"
+          mkdir -p "${ARCHIVE_DIR}"
+          cp zig-out/bin/copycat.exe "${ARCHIVE_DIR}/"
+          cp zig-out/lib/copycat.dll "${ARCHIVE_DIR}/"
+          zip -r "${ARCHIVE_DIR}.zip" "${ARCHIVE_DIR}"
+          echo "ARCHIVE=${ARCHIVE_DIR}.zip" >> "$GITHUB_ENV"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: copycat-windows-x86_64
+          path: ${{ env.ARCHIVE }}
+
+  release:
+    if: github.ref_type == 'tag'
+    needs: [build-macos, build-linux, build-windows]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          generate_release_notes: true
