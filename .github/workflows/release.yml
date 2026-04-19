@@ -44,7 +44,6 @@ jobs:
           ARCHIVE_DIR="copycat-${VERSION}-${{ matrix.archive_suffix }}"
           mkdir -p "${ARCHIVE_DIR}"
           cp zig-out/bin/copycat "${ARCHIVE_DIR}/"
-          cp zig-out/lib/libcopycat.dylib "${ARCHIVE_DIR}/"
           tar czf "${ARCHIVE_DIR}.tar.gz" "${ARCHIVE_DIR}"
           echo "ARCHIVE=${ARCHIVE_DIR}.tar.gz" >> "$GITHUB_ENV"
 
@@ -84,7 +83,6 @@ jobs:
           ARCHIVE_DIR="copycat-${VERSION}-${{ matrix.archive_suffix }}"
           mkdir -p "${ARCHIVE_DIR}"
           cp zig-out/bin/copycat "${ARCHIVE_DIR}/"
-          cp zig-out/lib/libcopycat.so "${ARCHIVE_DIR}/"
           tar czf "${ARCHIVE_DIR}.tar.gz" "${ARCHIVE_DIR}"
           echo "ARCHIVE=${ARCHIVE_DIR}.tar.gz" >> "$GITHUB_ENV"
 
@@ -101,7 +99,6 @@ jobs:
           DEB_NAME="copycat_${DEB_VERSION}_${{ matrix.deb_arch }}"
           mkdir -p "${DEB_NAME}/DEBIAN"
           mkdir -p "${DEB_NAME}/usr/bin"
-          mkdir -p "${DEB_NAME}/usr/lib"
           cat > "${DEB_NAME}/DEBIAN/control" <<EOF
           Package: copycat
           Version: ${DEB_VERSION}
@@ -114,7 +111,6 @@ jobs:
           Priority: optional
           EOF
           install -m 755 zig-out/bin/copycat "${DEB_NAME}/usr/bin/copycat"
-          install -m 644 zig-out/lib/libcopycat.so "${DEB_NAME}/usr/lib/libcopycat.so"
           dpkg-deb --root-owner-group --build "${DEB_NAME}"
           echo "DEB=${DEB_NAME}.deb" >> "$GITHUB_ENV"
 
@@ -144,7 +140,6 @@ jobs:
           ARCHIVE_DIR="copycat-${VERSION}-windows-x86_64"
           mkdir -p "${ARCHIVE_DIR}"
           cp zig-out/bin/copycat.exe "${ARCHIVE_DIR}/"
-          cp zig-out/bin/copycat.dll "${ARCHIVE_DIR}/"
           zip -r "${ARCHIVE_DIR}.zip" "${ARCHIVE_DIR}"
           echo "ARCHIVE=${ARCHIVE_DIR}.zip" >> "$GITHUB_ENV"
 
