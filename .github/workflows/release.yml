@@ -144,7 +144,7 @@ jobs:
           ARCHIVE_DIR="copycat-${VERSION}-windows-x86_64"
           mkdir -p "${ARCHIVE_DIR}"
           cp zig-out/bin/copycat.exe "${ARCHIVE_DIR}/"
-          cp zig-out/lib/copycat.dll "${ARCHIVE_DIR}/"
+          cp zig-out/bin/copycat.dll "${ARCHIVE_DIR}/"
           zip -r "${ARCHIVE_DIR}.zip" "${ARCHIVE_DIR}"
           echo "ARCHIVE=${ARCHIVE_DIR}.zip" >> "$GITHUB_ENV"
 

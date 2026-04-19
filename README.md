@@ -150,19 +150,101 @@ void clipboard_free(void* ptr);
 
 ### Bun FFI example
 
+The shared library can be loaded from any language with FFI support. Here's a complete example using Bun:
+
 ```ts
-import { dlopen, FFIType, suffix } from "bun:ffi";
+import { dlopen, FFIType, suffix, ptr, toBuffer, CString } from "bun:ffi";
 
 const lib = dlopen(`./zig-out/lib/libcopycat.${suffix}`, {
-  clipboard_list_formats: { args: [], returns: FFIType.cstring },
-  clipboard_change_count: { args: [], returns: FFIType.i64 },
-  clipboard_free: { args: [FFIType.ptr], returns: FFIType.void },
-  // ... etc
+  clipboard_list_formats: {
+    args: [],
+    returns: FFIType.ptr,
+  },
+  clipboard_read_format_ex: {
+    args: [FFIType.cstring, FFIType.ptr, FFIType.ptr, FFIType.ptr],
+    returns: FFIType.void,
+  },
+  clipboard_write_format: {
+    args: [FFIType.cstring, FFIType.ptr, FFIType.u64],
+    returns: FFIType.i32,
+  },
+  clipboard_clear: {
+    args: [],
+    returns: FFIType.i32,
+  },
+  clipboard_change_count: {
+    args: [],
+    returns: FFIType.i64,
+  },
+  clipboard_free: {
+    args: [FFIType.ptr],
+    returns: FFIType.void,
+  },
 });
 
-const formats = JSON.parse(lib.symbols.clipboard_list_formats().toString());
-console.log(formats); // ["public.utf8-plain-text", "public.html", ...]
+const { symbols: clip } = lib;
+
+// List all formats currently on the clipboard
+function listFormats(): string[] {
+  const rawPtr = clip.clipboard_list_formats();
+  if (!rawPtr) return [];
+  const json = new CString(rawPtr);
+  const formats = JSON.parse(json.toString());
+  clip.clipboard_free(rawPtr);
+  return formats;
+}
+
+// Read raw bytes for a specific format
+function readFormat(format: string): Buffer | null {
+  const outData = new BigInt64Array(1);
+  const outLen = new BigInt64Array(1);
+  const outStatus = new Int32Array(1);
+
+  clip.clipboard_read_format_ex(
+    Buffer.from(format + "\0"),
+    ptr(outData),
+    ptr(outLen),
+    ptr(outStatus),
+  );
+
+  if (outStatus[0] !== 0) return null;
+  const len = Number(outLen[0]);
+  if (len === 0) return Buffer.alloc(0);
+
+  const dataPtr = Number(outData[0]);
+  const buf = Buffer.from(toBuffer(dataPtr, 0, len));
+  clip.clipboard_free(dataPtr);
+  return buf;
+}
+
+// Write data to the clipboard under a given format
+function writeFormat(format: string, data: string | Buffer): boolean {
+  const buf = typeof data === "string" ? Buffer.from(data) : data;
+  return clip.clipboard_write_format(
+    Buffer.from(format + "\0"),
+    buf.length > 0 ? ptr(buf) : 0,
+    buf.length,
+  ) === 0;
+}
+
+// --- Usage ---
+
+// Show what's on the clipboard
+console.log("Formats:", listFormats());
+console.log("Change count:", Number(clip.clipboard_change_count()));
+
+// Read plain text
+const text = readFormat("public.utf8-plain-text");
+if (text) console.log("Text:", text.toString());
+
+// Write plain text
+writeFormat("public.utf8-plain-text", "Hello from Bun FFI!");
+console.log("After write:", readFormat("public.utf8-plain-text")?.toString());
 ```
+
+The `_ex` variant of `clipboard_read_format` uses out-pointers instead of returning a struct, which is more compatible with Bun's FFI. The regular `clipboard_read_format` returns a struct by value and works better with languages that support that calling convention (C, Rust, etc.).
+
+A runnable version of this example lives at [`examples/bun-ffi.ts`](examples/bun-ffi.ts). Build the library first with `zig build`, then run it with `bun run examples/bun-ffi.ts`.
 
 ## Project Structure
 
@@ -175,6 +257,8 @@ src/
 └── platform/
     └── macos.zig         # NSPasteboard backend
 completions/              # Shell completions (fish, bash, zsh)
+examples/
+└── bun-ffi.ts            # Bun FFI example (list, read, write)
 build.zig                 # Builds both the CLI executable and the .dylib
 ```
 
