@@ -91,6 +91,13 @@ pub fn build(b: *std.Build) void {
     });
     b.installArtifact(lib_static);
 
+    // Shared module for web custom data parsing (pure Zig, no OS deps)
+    const web_custom_data_mod = b.createModule(.{
+        .root_source_file = b.path("src/web_custom_data.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     // CLI executable
     const exe = b.addExecutable(.{
         .name = "copycat",
@@ -100,6 +107,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "clipboard", .module = clipboard_mod },
+                .{ .name = "web_custom_data", .module = web_custom_data_mod },
             },
         }),
     });
@@ -130,8 +138,18 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
+    const web_custom_data_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/web_custom_data.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+
     const run_paths_tests = b.addRunArtifact(paths_tests);
+    const run_web_custom_data_tests = b.addRunArtifact(web_custom_data_tests);
 
     const test_step = b.step("test", "Run pure-Zig unit tests");
     test_step.dependOn(&run_paths_tests.step);
+    test_step.dependOn(&run_web_custom_data_tests.step);
 }

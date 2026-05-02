@@ -1,5 +1,6 @@
 const std = @import("std");
 const clipboard = @import("clipboard");
+const web_custom_data = @import("web_custom_data");
 
 const Allocator = std.mem.Allocator;
 
@@ -78,7 +79,7 @@ pub fn main() !void {
         try hw.interface.flush();
         return;
     } else if (std.mem.eql(u8, command, "list")) {
-        return cmdList(allocator, json_output) catch |err| return handleTopLevelError(err);
+        return cmdList(allocator, cmd_args[1..], json_output) catch |err| return handleTopLevelError(err);
     } else if (std.mem.eql(u8, command, "read")) {
         return cmdRead(allocator, cmd_args[1..]) catch |err| return handleTopLevelError(err);
     } else if (std.mem.eql(u8, command, "write")) {
@@ -87,6 +88,8 @@ pub fn main() !void {
         return cmdClear() catch |err| return handleTopLevelError(err);
     } else if (std.mem.eql(u8, command, "watch")) {
         return cmdWatch(allocator, cmd_args[1..], json_output) catch |err| return handleTopLevelError(err);
+    } else if (std.mem.eql(u8, command, "completions")) {
+        return cmdCompletions(cmd_args[1..]) catch |err| return handleTopLevelError(err);
     } else {
         const stderr_file = std.fs.File.stderr();
         var errbuf: [4096]u8 = undefined;
@@ -105,11 +108,14 @@ fn printUsage(writer: *std.io.Writer) !void {
         \\Commands:
         \\  (none)                          Show clipboard contents (default)
         \\  list                            List format names, one per line
-        \\  read <format> [--out <file>]    Read format data to stdout, or to a file
-        \\                [--as-path [-0]]  Decode file-reference formats to POSIX paths
+        \\  list --sub-types <format>       List sub-types in a web container format
+        \\  read <format> [sub-type]        Read format data (or sub-type) to stdout
+        \\       [--out <file>]             Write output to a file instead
+        \\       [--as-path [-0]]           Decode file-reference formats to POSIX paths
         \\  write <format> [--data <text>]  Write inline data, or read from stdin
         \\  clear                           Clear the clipboard
         \\  watch                           Watch for clipboard changes (event-driven)
+        \\  completions <shell>             Print shell completions (fish, bash, zsh)
         \\  help                            Show this help message
         \\
         \\Global flags:
@@ -150,7 +156,7 @@ fn introspect(allocator: Allocator, json_output: bool) !void {
         const data = try clipboard.readFormat(allocator, format);
         if (data) |bytes| {
             defer allocator.free(bytes);
-            try printFormatPreview(&w.interface, format, bytes);
+            try printFormatPreview(allocator, &w.interface, format, bytes);
         } else {
             try w.interface.print("  {s}    (not readable)\n\n", .{format});
         }
@@ -158,8 +164,42 @@ fn introspect(allocator: Allocator, json_output: bool) !void {
     try w.interface.flush();
 }
 
-fn printFormatPreview(writer: *std.io.Writer, format: []const u8, bytes: []const u8) !void {
+fn printFormatPreview(allocator: Allocator, writer: *std.io.Writer, format: []const u8, bytes: []const u8) !void {
     try writer.print("  {s}    {d} bytes\n", .{ format, bytes.len });
+
+    // Try to parse web custom data container formats
+    if (isWebCustomDataFormat(format)) {
+        if (web_custom_data.parse(allocator, bytes)) |result| {
+            defer result.deinit(allocator);
+            const format_name: []const u8 = switch (result.format) {
+                .chromium => "Chromium",
+                .firefox => "Firefox",
+                .webkit => "WebKit/Safari",
+            };
+            try writer.print("  [{s} container", .{format_name});
+            if (result.origin) |origin| {
+                try writer.print(", origin: {s}", .{origin});
+            }
+            try writer.print("]\n", .{});
+            for (result.sub_types) |st| {
+                if (st.value) |val| {
+                    const preview_len = @min(val.len, 60);
+                    var preview_buf: [60]u8 = undefined;
+                    for (val[0..preview_len], 0..) |c, i| {
+                        preview_buf[i] = if (c == '\n' or c == '\r') ' ' else c;
+                    }
+                    try writer.print("    {s}    {d} bytes\n", .{ st.name, val.len });
+                    try writer.print("    \"{s}", .{preview_buf[0..preview_len]});
+                    if (val.len > 60) try writer.print("...", .{});
+                    try writer.print("\"\n", .{});
+                } else {
+                    try writer.print("    {s}    (null)\n", .{st.name});
+                }
+            }
+            try writer.print("\n", .{});
+            return;
+        } else |_| {}
+    }
 
     if (isLikelyText(format)) {
         const preview_len = @min(bytes.len, 80);
@@ -182,6 +222,99 @@ fn printFormatPreview(writer: *std.io.Writer, format: []const u8, bytes: []const
         try writer.print("]", .{});
         if (bytes.len > 8) try writer.print(" ...", .{});
         try writer.print(" ({s})\n\n", .{detectType(bytes)});
+    }
+}
+
+fn isWebCustomDataFormat(format: []const u8) bool {
+    const web_formats = [_][]const u8{
+        "com.apple.WebKit.custom-pasteboard-data",
+        "org.chromium.web-custom-data",
+        "application/x-moz-custom-clipdata",
+    };
+    for (web_formats) |wf| {
+        if (std.mem.eql(u8, format, wf)) return true;
+    }
+    return false;
+}
+
+/// Check if a format string is "container/sub-type" and extract the sub-type value.
+/// Returns owned slice with the sub-type value, or null if not a web sub-type reference.
+fn resolveWebSubType(allocator: Allocator, format: []const u8) ?[]u8 {
+    const prefixes = [_][]const u8{
+        "com.apple.WebKit.custom-pasteboard-data/",
+        "org.chromium.web-custom-data/",
+        "application/x-moz-custom-clipdata/",
+    };
+    const container_names = [_][]const u8{
+        "com.apple.WebKit.custom-pasteboard-data",
+        "org.chromium.web-custom-data",
+        "application/x-moz-custom-clipdata",
+    };
+
+    for (prefixes, 0..) |prefix, idx| {
+        if (std.mem.startsWith(u8, format, prefix)) {
+            const sub_type_name = format[prefix.len..];
+            if (sub_type_name.len == 0) return null;
+
+            const container = container_names[idx];
+            const data = clipboard.readFormat(allocator, container) catch return null;
+            if (data) |bytes| {
+                defer allocator.free(bytes);
+                if (web_custom_data.parse(allocator, bytes)) |result| {
+                    defer result.deinit(allocator);
+                    for (result.sub_types) |st| {
+                        if (std.mem.eql(u8, st.name, sub_type_name)) {
+                            if (st.value) |val| {
+                                const owned = allocator.alloc(u8, val.len) catch return null;
+                                @memcpy(owned, val);
+                                return owned;
+                            }
+                            return null;
+                        }
+                    }
+                } else |_| {}
+            }
+            return null;
+        }
+    }
+    return null;
+}
+
+/// Resolve a sub-type from two separate args: container format + sub-type name.
+fn resolveWebSubTypeFromArgs(allocator: Allocator, container: []const u8, sub_type_name: []const u8) ?[]u8 {
+    if (!isWebCustomDataFormat(container)) return null;
+    const data = clipboard.readFormat(allocator, container) catch return null;
+    if (data) |bytes| {
+        defer allocator.free(bytes);
+        if (web_custom_data.parse(allocator, bytes)) |result| {
+            defer result.deinit(allocator);
+            for (result.sub_types) |st| {
+                if (std.mem.eql(u8, st.name, sub_type_name)) {
+                    if (st.value) |val| {
+                        const owned = allocator.alloc(u8, val.len) catch return null;
+                        @memcpy(owned, val);
+                        return owned;
+                    }
+                    return null;
+                }
+            }
+        } else |_| {}
+    }
+    return null;
+}
+
+/// List sub-type names for a given web custom data container format.
+fn listSubTypes(allocator: Allocator, writer: *std.io.Writer, container: []const u8) !void {
+    if (!isWebCustomDataFormat(container)) return;
+    const data = try clipboard.readFormat(allocator, container);
+    if (data) |bytes| {
+        defer allocator.free(bytes);
+        if (web_custom_data.parse(allocator, bytes)) |result| {
+            defer result.deinit(allocator);
+            for (result.sub_types) |st| {
+                try writer.print("{s}\n", .{st.name});
+            }
+        } else |_| {}
     }
 }
 
@@ -233,10 +366,28 @@ fn jsonIntrospect(allocator: Allocator, writer: *std.io.Writer, formats: [][]con
     try writer.print("]}}\n", .{});
 }
 
-fn cmdList(allocator: Allocator, json_output: bool) !void {
+fn cmdList(allocator: Allocator, args: []const []const u8, json_output: bool) !void {
     const stdout_file = std.fs.File.stdout();
     var buf: [4096]u8 = undefined;
     var w = stdout_file.writer(&buf);
+
+    // --sub-types <format>: list only sub-type names for a container format
+    var sub_types_for: ?[]const u8 = null;
+    {
+        var i: usize = 0;
+        while (i < args.len) : (i += 1) {
+            if (std.mem.eql(u8, args[i], "--sub-types") and i + 1 < args.len) {
+                sub_types_for = args[i + 1];
+                i += 1;
+            }
+        }
+    }
+
+    if (sub_types_for) |container| {
+        try listSubTypes(allocator, &w.interface, container);
+        try w.interface.flush();
+        return;
+    }
 
     const formats = try clipboard.listFormats(allocator);
     defer {
@@ -257,6 +408,19 @@ fn cmdList(allocator: Allocator, json_output: bool) !void {
 
     for (formats) |format| {
         try w.interface.print("{s}\n", .{format});
+        // Expand web custom data sub-types inline
+        if (isWebCustomDataFormat(format)) {
+            const data = try clipboard.readFormat(allocator, format);
+            if (data) |bytes| {
+                defer allocator.free(bytes);
+                if (web_custom_data.parse(allocator, bytes)) |result| {
+                    defer result.deinit(allocator);
+                    for (result.sub_types) |st| {
+                        try w.interface.print("  {s}/{s}\n", .{ format, st.name });
+                    }
+                } else |_| {}
+            }
+        }
     }
     try w.interface.flush();
 }
@@ -266,12 +430,13 @@ fn cmdRead(allocator: Allocator, args: []const []const u8) !void {
         const stderr_file = std.fs.File.stderr();
         var errbuf: [4096]u8 = undefined;
         var ew = stderr_file.writer(&errbuf);
-        try ew.interface.print("Usage: copycat read <format> [--out <file>] [--as-path [-0]]\n", .{});
+        try ew.interface.print("Usage: copycat read <format> [sub-type] [--out <file>] [--as-path [-0]]\n", .{});
         try ew.interface.flush();
         std.process.exit(1);
     }
 
     const format = args[0];
+    var sub_type_arg: ?[]const u8 = null;
     var out_file: ?[]const u8 = null;
     var as_path = false;
     var null_sep = false;
@@ -285,6 +450,9 @@ fn cmdRead(allocator: Allocator, args: []const []const u8) !void {
             as_path = true;
         } else if (std.mem.eql(u8, args[i], "-0") or std.mem.eql(u8, args[i], "--null")) {
             null_sep = true;
+        } else if (!std.mem.startsWith(u8, args[i], "-") and sub_type_arg == null) {
+            // Second positional arg = sub-type name
+            sub_type_arg = args[i];
         }
         // Unknown flags are ignored, matching the existing (lax) behavior.
     }
@@ -303,6 +471,30 @@ fn cmdRead(allocator: Allocator, args: []const []const u8) !void {
     // --- Dispatch ---
 
     if (!as_path) {
+        // Resolve sub-type: either from second positional arg or "container/sub-type" slash syntax
+        const sub_type_result = if (sub_type_arg) |st|
+            resolveWebSubTypeFromArgs(allocator, format, st)
+        else
+            resolveWebSubType(allocator, format);
+
+        if (sub_type_result) |sub_val| {
+            defer allocator.free(sub_val);
+            if (out_file) |path| {
+                const file = try std.fs.cwd().createFile(path, .{});
+                defer file.close();
+                try file.writeAll(sub_val);
+                const stderr_file = std.fs.File.stderr();
+                var errbuf: [4096]u8 = undefined;
+                var ew = stderr_file.writer(&errbuf);
+                try ew.interface.print("Wrote {d} bytes to {s}\n", .{ sub_val.len, path });
+                try ew.interface.flush();
+            } else {
+                const stdout_file = std.fs.File.stdout();
+                try stdout_file.writeAll(sub_val);
+            }
+            return;
+        }
+
         // Existing raw-bytes path — unchanged.
         const data = try clipboard.readFormat(allocator, format);
         if (data) |bytes| {
@@ -459,6 +651,192 @@ fn cmdWatch(allocator: Allocator, args: []const []const u8, json_output: bool) !
         try stdout_w.interface.flush();
     }
 }
+
+fn cmdCompletions(args: []const []const u8) !void {
+    const stdout_file = std.fs.File.stdout();
+
+    const shell = if (args.len > 0) args[0] else {
+        const stderr_file = std.fs.File.stderr();
+        var errbuf: [4096]u8 = undefined;
+        var ew = stderr_file.writer(&errbuf);
+        try ew.interface.print("Usage: copycat completions <fish|bash|zsh>\n", .{});
+        try ew.interface.flush();
+        std.process.exit(1);
+    };
+
+    if (std.mem.eql(u8, shell, "fish")) {
+        try stdout_file.writeAll(fish_completions);
+    } else if (std.mem.eql(u8, shell, "bash")) {
+        try stdout_file.writeAll(bash_completions);
+    } else if (std.mem.eql(u8, shell, "zsh")) {
+        try stdout_file.writeAll(zsh_completions);
+    } else {
+        const stderr_file = std.fs.File.stderr();
+        var errbuf: [4096]u8 = undefined;
+        var ew = stderr_file.writer(&errbuf);
+        try ew.interface.print("Unknown shell: {s}. Supported: fish, bash, zsh\n", .{shell});
+        try ew.interface.flush();
+        std.process.exit(1);
+    }
+}
+
+const fish_completions =
+    \\# copycat completions for fish
+    \\# Install: copycat completions fish | source
+    \\# Persist: copycat completions fish > ~/.config/fish/completions/copycat.fish
+    \\
+    \\# Clear any previously loaded copycat completions
+    \\complete -e -c copycat
+    \\complete -c copycat -f
+    \\complete -c copycat -n "__fish_use_subcommand" -a "list" -d "List clipboard formats"
+    \\complete -c copycat -n "__fish_use_subcommand" -a "read" -d "Read clipboard format"
+    \\complete -c copycat -n "__fish_use_subcommand" -a "write" -d "Write clipboard format"
+    \\complete -c copycat -n "__fish_use_subcommand" -a "clear" -d "Clear clipboard"
+    \\complete -c copycat -n "__fish_use_subcommand" -a "watch" -d "Watch for changes"
+    \\complete -c copycat -n "__fish_use_subcommand" -a "completions" -d "Print shell completions"
+    \\complete -c copycat -n "__fish_use_subcommand" -a "help" -d "Show help"
+    \\complete -c copycat -l json -d "Output as JSON"
+    \\complete -c copycat -l help -s h -d "Show help"
+    \\
+    \\# read: first arg = format from clipboard
+    \\# Only show when exactly "copycat read" is typed (2 tokens before cursor)
+    \\complete -c copycat -n "__fish_seen_subcommand_from read; and test (count (commandline -oc)) -le 2" -f -a "(copycat list 2>/dev/null | grep -v '^  ')" -d "Clipboard format"
+    \\
+    \\# read: second arg = sub-type
+    \\# Show when "copycat read <format>" is typed (3 tokens before cursor)
+    \\# Uses -k to keep order and -f to suppress file completions on the "/" in MIME types
+    \\complete -c copycat -n "__fish_seen_subcommand_from read; and test (count (commandline -oc)) -ge 3" -f -k -a "(copycat list --sub-types (commandline -oc)[3] 2>/dev/null)" -d "Sub-type"
+    \\
+    \\# read flags
+    \\complete -c copycat -n "__fish_seen_subcommand_from read" -l out -r -d "Write to file"
+    \\complete -c copycat -n "__fish_seen_subcommand_from read" -l as-path -d "Decode as file paths"
+    \\complete -c copycat -n "__fish_seen_subcommand_from read" -s 0 -l null -d "Null-separate paths"
+    \\
+    \\# write: first arg = format
+    \\complete -c copycat -n "__fish_seen_subcommand_from write; and test (count (commandline -opc)) -eq 2" -a "(copycat list 2>/dev/null | grep -v '^  ')" -d "Clipboard format"
+    \\complete -c copycat -n "__fish_seen_subcommand_from write" -l data -r -d "Inline data"
+    \\
+    \\# list flags
+    \\complete -c copycat -n "__fish_seen_subcommand_from list" -l sub-types -r -a "(copycat list 2>/dev/null | grep -v '^  ')" -d "List sub-types for format"
+    \\
+    \\# completions: shell name
+    \\complete -c copycat -n "__fish_seen_subcommand_from completions" -a "fish bash zsh"
+    \\
+;
+
+const bash_completions =
+    \\# copycat completions for bash
+    \\# Install: eval "$(copycat completions bash)"
+    \\# Persist: copycat completions bash > /etc/bash_completion.d/copycat
+    \\
+    \\_copycat() {
+    \\    local cur prev words cword
+    \\    _init_completion || return
+    \\
+    \\    local commands="list read write clear watch completions help"
+    \\
+    \\    if [[ $cword -eq 1 ]]; then
+    \\        COMPREPLY=($(compgen -W "$commands --json --help -h" -- "$cur"))
+    \\        return
+    \\    fi
+    \\
+    \\    local cmd="${words[1]}"
+    \\
+    \\    case "$cmd" in
+    \\        read)
+    \\            if [[ $cword -eq 2 ]]; then
+    \\                local formats
+    \\                formats=$(copycat list 2>/dev/null | grep -v '^  ')
+    \\                COMPREPLY=($(compgen -W "$formats --out --as-path" -- "$cur"))
+    \\            elif [[ $cword -eq 3 && "${words[2]}" != --* ]]; then
+    \\                local subtypes
+    \\                subtypes=$(copycat list --sub-types "${words[2]}" 2>/dev/null)
+    \\                COMPREPLY=($(compgen -W "$subtypes --out --as-path" -- "$cur"))
+    \\            fi
+    \\            ;;
+    \\        write)
+    \\            if [[ $cword -eq 2 ]]; then
+    \\                local formats
+    \\                formats=$(copycat list 2>/dev/null | grep -v '^  ')
+    \\                COMPREPLY=($(compgen -W "$formats --data" -- "$cur"))
+    \\            fi
+    \\            ;;
+    \\        list)
+    \\            COMPREPLY=($(compgen -W "--sub-types --json" -- "$cur"))
+    \\            ;;
+    \\        completions)
+    \\            COMPREPLY=($(compgen -W "fish bash zsh" -- "$cur"))
+    \\            ;;
+    \\    esac
+    \\}
+    \\complete -F _copycat copycat
+    \\
+;
+
+const zsh_completions =
+    \\#compdef copycat
+    \\# copycat completions for zsh
+    \\# Install: copycat completions zsh | source /dev/stdin
+    \\# Persist: copycat completions zsh > ~/.zfunc/_copycat && fpath+=(~/.zfunc)
+    \\
+    \\_copycat() {
+    \\    local -a commands
+    \\    commands=(
+    \\        'list:List clipboard formats'
+    \\        'read:Read clipboard format'
+    \\        'write:Write clipboard format'
+    \\        'clear:Clear clipboard'
+    \\        'watch:Watch for changes'
+    \\        'completions:Print shell completions'
+    \\        'help:Show help'
+    \\    )
+    \\
+    \\    _arguments -C \
+    \\        '--json[Output as JSON]' \
+    \\        '(--help -h)'{--help,-h}'[Show help]' \
+    \\        '1:command:->cmd' \
+    \\        '*::arg:->args'
+    \\
+    \\    case "$state" in
+    \\        cmd)
+    \\            _describe 'command' commands
+    \\            ;;
+    \\        args)
+    \\            case "${words[1]}" in
+    \\                read)
+    \\                    if (( CURRENT == 2 )); then
+    \\                        local -a formats
+    \\                        formats=(${(f)"$(copycat list 2>/dev/null | grep -v '^  ')"})
+    \\                        _describe 'format' formats
+    \\                    elif (( CURRENT == 3 )); then
+    \\                        local -a subtypes
+    \\                        subtypes=(${(f)"$(copycat list --sub-types "${words[2]}" 2>/dev/null)"})
+    \\                        if [[ -n "$subtypes" ]]; then
+    \\                            _describe 'sub-type' subtypes
+    \\                        fi
+    \\                    fi
+    \\                    ;;
+    \\                write)
+    \\                    if (( CURRENT == 2 )); then
+    \\                        local -a formats
+    \\                        formats=(${(f)"$(copycat list 2>/dev/null | grep -v '^  ')"})
+    \\                        _describe 'format' formats
+    \\                    fi
+    \\                    ;;
+    \\                list)
+    \\                    _arguments '--sub-types[List sub-types]:format:($(copycat list 2>/dev/null | grep -v "^  "))'
+    \\                    ;;
+    \\                completions)
+    \\                    _values 'shell' fish bash zsh
+    \\                    ;;
+    \\            esac
+    \\            ;;
+    \\    esac
+    \\}
+    \\
+    \\_copycat "$@"
+    \\
+;
 
 const WatchContext = struct {
     allocator: Allocator,
