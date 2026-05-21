@@ -1,6 +1,9 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const clipboard = @import("clipboard");
 const web_custom_data = @import("web_custom_data");
+
+const version = "0.3.1";
 
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -58,6 +61,13 @@ pub fn main(init: std.process.Init) !void {
     for (all_args.items) |arg| {
         if (std.mem.eql(u8, arg, "--json")) {
             json_output = true;
+        } else if (std.mem.eql(u8, arg, "--version") or std.mem.eql(u8, arg, "-V")) {
+            const stdout_file = File.stdout();
+            var vbuf: [256]u8 = undefined;
+            var vw = stdout_file.writerStreaming(io, &vbuf);
+            try vw.interface.print("copycat " ++ version ++ " (" ++ @tagName(builtin.os.tag) ++ ")\n", .{});
+            try vw.interface.flush();
+            return;
         } else if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
             help_requested = true;
         } else {
@@ -116,7 +126,13 @@ fn printUsage(writer: *std.Io.Writer) !void {
     try writer.print(
         \\Usage: copycat [command] [options]
         \\
+        \\Cross-platform clipboard CLI.
+        \\Version {s} ({s})
+        \\
         \\Commands:
+        \\
+    , .{ version, @tagName(builtin.os.tag) });
+    try writer.print(
         \\  (none)                          Show clipboard contents (default)
         \\  list                            List format names, one per line
         \\  list --sub-types <format>       List sub-types in a web container format
@@ -131,6 +147,7 @@ fn printUsage(writer: *std.Io.Writer) !void {
         \\
         \\Global flags:
         \\  --json                          Output as JSON (introspect, list)
+        \\  --version, -V                   Show version
         \\  --help, -h                      Show this help message
         \\
         \\Created by George Mandis <george@mand.is>
@@ -705,6 +722,7 @@ const fish_completions =
     \\complete -c copycat -n "__fish_use_subcommand" -a "completions" -d "Print shell completions"
     \\complete -c copycat -n "__fish_use_subcommand" -a "help" -d "Show help"
     \\complete -c copycat -l json -d "Output as JSON"
+    \\complete -c copycat -l version -s V -d "Show version"
     \\complete -c copycat -l help -s h -d "Show help"
     \\
     \\# read: first arg = format from clipboard
@@ -745,7 +763,7 @@ const bash_completions =
     \\    local commands="list read write clear watch completions help"
     \\
     \\    if [[ $cword -eq 1 ]]; then
-    \\        COMPREPLY=($(compgen -W "$commands --json --help -h" -- "$cur"))
+    \\        COMPREPLY=($(compgen -W "$commands --json --version -V --help -h" -- "$cur"))
     \\        return
     \\    fi
     \\
@@ -802,6 +820,7 @@ const zsh_completions =
     \\
     \\    _arguments -C \
     \\        '--json[Output as JSON]' \
+    \\        '(--version -V)'{--version,-V}'[Show version]' \
     \\        '(--help -h)'{--help,-h}'[Show help]' \
     \\        '1:command:->cmd' \
     \\        '*::arg:->args'
