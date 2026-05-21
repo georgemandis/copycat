@@ -648,7 +648,7 @@ fn cmdWatch(allocator: Allocator, io: Io, args: []const [:0]const u8, json_outpu
     // SIGINT handling relies on process termination — see spec's cmdWatch section.
     while (true) {
         while (!context.pending.swap(false, .acq_rel)) {
-            _ = std.c.nanosleep(&.{ .sec = 0, .nsec = 50_000_000 }, null); // 50ms
+            try std.Io.sleep(io, std.Io.Duration.fromMilliseconds(50), .awake);
         }
 
         try introspect(allocator, io, json_output);

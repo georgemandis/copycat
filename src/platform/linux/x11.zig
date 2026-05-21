@@ -749,7 +749,7 @@ pub fn getSourceInfo() @import("../../clipboard.zig").ClipboardSourceInfo {
     const path_z = std.fmt.bufPrintZ(&path_buf, "/proc/{d}/comm", .{pid}) catch {
         return ClipboardSourceInfo{ .pid = pid, .name = null, .status = 0 };
     };
-    const fd = std.c.open(path_z, .{ .ACCMODE = .RDONLY }, 0);
+    const fd = std.c.open(path_z, .{ .ACCMODE = .RDONLY }, @as(std.c.mode_t, 0));
     if (fd < 0) {
         return ClipboardSourceInfo{ .pid = pid, .name = null, .status = 0 };
     }

@@ -471,7 +471,7 @@ fn messageThreadFn() void {
     // -1 on error (which we treat as exit).
     var msg: MSG = undefined;
     while (true) {
-        const ret = GetMessageW(&msg, null, 0, 0);
+        const ret: c_int = @intFromEnum(GetMessageW(&msg, null, 0, 0));
         if (ret == 0 or ret == -1) break; // WM_QUIT or error
         _ = TranslateMessage(&msg);
         _ = DispatchMessageW(&msg);
