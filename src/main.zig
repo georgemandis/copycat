@@ -37,7 +37,8 @@ pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
     const io = init.io;
 
-    var args_iter = std.process.Args.Iterator.init(init.minimal.args);
+    var args_iter = try std.process.Args.Iterator.initAllocator(init.minimal.args, allocator);
+    defer args_iter.deinit();
     // Skip argv[0] (program name)
     _ = args_iter.next();
 

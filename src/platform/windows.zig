@@ -233,7 +233,7 @@ pub fn getChangeCount() i64 {
 /// Returns a slice of all format name strings currently on the clipboard.
 /// Caller owns the returned outer slice and each inner string.
 pub fn listFormats(allocator: Allocator) ![][]const u8 {
-    if (OpenClipboard(null) == 0) return ClipboardError.PasteboardUnavailable;
+    if (OpenClipboard(null) == .FALSE) return ClipboardError.PasteboardUnavailable;
     defer _ = CloseClipboard();
 
     var list: std.ArrayListUnmanaged([]const u8) = .empty;
@@ -265,7 +265,7 @@ pub fn listFormats(allocator: Allocator) ![][]const u8 {
 pub fn readFormat(allocator: Allocator, format: []const u8) !?[]const u8 {
     const fmt_id = try formatNameToId(allocator, format);
 
-    if (OpenClipboard(null) == 0) return ClipboardError.PasteboardUnavailable;
+    if (OpenClipboard(null) == .FALSE) return ClipboardError.PasteboardUnavailable;
     defer _ = CloseClipboard();
 
     const hdata = GetClipboardData(fmt_id) orelse return null; // format not present
@@ -289,7 +289,7 @@ pub fn readFormat(allocator: Allocator, format: []const u8) !?[]const u8 {
 
 pub fn writeFormat(allocator: Allocator, format: []const u8, data: []const u8) !void {
     const id = try formatNameToId(allocator, format);
-    if (OpenClipboard(null) == 0) return error.PasteboardUnavailable;
+    if (OpenClipboard(null) == .FALSE) return error.PasteboardUnavailable;
     defer _ = CloseClipboard();
     _ = EmptyClipboard();
     const hmem = GlobalAlloc(GMEM_MOVEABLE, data.len) orelse return error.PasteboardUnavailable;
@@ -302,7 +302,7 @@ pub fn writeFormat(allocator: Allocator, format: []const u8, data: []const u8) !
 }
 
 pub fn writeMultiple(allocator: Allocator, pairs: []const FormatDataPair) !void {
-    if (OpenClipboard(null) == 0) return error.PasteboardUnavailable;
+    if (OpenClipboard(null) == .FALSE) return error.PasteboardUnavailable;
     defer _ = CloseClipboard();
     _ = EmptyClipboard();
     for (pairs) |pair| {
@@ -317,7 +317,7 @@ pub fn writeMultiple(allocator: Allocator, pairs: []const FormatDataPair) !void 
 }
 
 pub fn clear() !void {
-    if (OpenClipboard(null) == 0) return error.PasteboardUnavailable;
+    if (OpenClipboard(null) == .FALSE) return error.PasteboardUnavailable;
     defer _ = CloseClipboard();
     _ = EmptyClipboard();
 }
@@ -456,7 +456,7 @@ fn messageThreadFn() void {
         return;
     }
 
-    if (AddClipboardFormatListener(hwnd) == 0) {
+    if (AddClipboardFormatListener(hwnd) == .FALSE) {
         // Failed to register listener — clean up and exit.
         _ = DestroyWindow(hwnd);
         return;
@@ -579,7 +579,7 @@ pub fn getSourceInfo() @import("../clipboard.zig").ClipboardSourceInfo {
         };
     }
 
-    const process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+    const process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, .FALSE, pid);
     if (process == null) {
         return ClipboardSourceInfo{
             .pid = @intCast(pid),

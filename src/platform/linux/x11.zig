@@ -744,21 +744,23 @@ pub fn getSourceInfo() @import("../../clipboard.zig").ClipboardSourceInfo {
     const pid: i64 = @intCast(pid_ptr.*);
     _ = c.XFree(prop_data.?);
 
-    // Read /proc/{pid}/comm for process name
+    // Read /proc/{pid}/comm for process name (use libc since std.fs.File requires Io)
     var path_buf: [64]u8 = undefined;
-    const path = std.fmt.bufPrint(&path_buf, "/proc/{d}/comm", .{pid}) catch {
+    const path_z = std.fmt.bufPrintZ(&path_buf, "/proc/{d}/comm", .{pid}) catch {
         return ClipboardSourceInfo{ .pid = pid, .name = null, .status = 0 };
     };
-
-    const file = std.fs.openFileAbsolute(path, .{}) catch {
+    const fd = std.c.open(path_z, .{ .ACCMODE = .RDONLY }, 0);
+    if (fd < 0) {
         return ClipboardSourceInfo{ .pid = pid, .name = null, .status = 0 };
-    };
-    defer file.close();
+    }
+    defer _ = std.c.close(fd);
 
     var name_buf: [256]u8 = undefined;
-    const bytes_read = file.read(&name_buf) catch {
+    const rc = std.c.read(fd, &name_buf, name_buf.len);
+    if (rc <= 0) {
         return ClipboardSourceInfo{ .pid = pid, .name = null, .status = 0 };
-    };
+    }
+    const bytes_read: usize = @intCast(rc);
 
     if (bytes_read == 0) {
         return ClipboardSourceInfo{ .pid = pid, .name = null, .status = 0 };
