@@ -41,7 +41,7 @@ Download the latest release from [GitHub Releases](https://github.com/georgemand
 | Windows  | ✅ Implemented (Win32 clipboard API) |
 | Linux    | ✅ Implemented (X11 + Wayland via wlr-data-control) |
 
-Built and tested against **Zig 0.15.2**.
+Built and tested against **Zig 0.16.0**.
 
 ## Why
 
@@ -49,7 +49,7 @@ Most clipboard libraries expose a fixed set of types — text, image, files. But
 
 ## Building from source
 
-Zig 0.15.2 required.
+Zig 0.16.0 required.
 
 ```sh
 zig build

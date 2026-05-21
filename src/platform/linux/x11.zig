@@ -9,6 +9,18 @@ const c = @cImport({
 const mod = @import("mod.zig");
 const ClipboardError = mod.ClipboardError;
 
+/// Returns monotonic nanoseconds, suitable for measuring elapsed time.
+fn monotonicNanos() i128 {
+    var ts: std.c.timespec = undefined;
+    _ = std.c.clock_gettime(.MONOTONIC, &ts);
+    return @as(i128, ts.sec) * std.time.ns_per_s + ts.nsec;
+}
+
+/// Returns monotonic milliseconds, suitable for measuring elapsed time.
+fn monotonicMillis() i64 {
+    return @intCast(@divFloor(monotonicNanos(), std.time.ns_per_ms));
+}
+
 var display: ?*c.Display = null;
 var our_window: c.Window = 0;
 var clipboard_atom: c.Atom = 0;
@@ -30,8 +42,8 @@ const AtomEntry = struct {
     mime: []u8,
     atom: c.Atom,
 };
-var atom_cache_mutex: std.Thread.Mutex = .{};
-var atom_cache: std.ArrayListUnmanaged(AtomEntry) = .{};
+var atom_cache_mutex: SpinMutex = .{};
+var atom_cache: std.ArrayListUnmanaged(AtomEntry) = .empty;
 // Module-level allocator for backend-private state: atom cache, subscriber
 // registry, module-owned format buffers. Set once by `tryOpenDisplay`.
 // Long-lived -- not freed until process exit (backend state lives forever).
@@ -125,12 +137,12 @@ pub fn readFormat(alloc: Allocator, format: []const u8) !?[]const u8 {
 
     // Wait up to 2 seconds for the SelectionNotify reply.
     const deadline_ns: u64 = 2 * std.time.ns_per_s;
-    const start = std.time.nanoTimestamp();
+    const start = monotonicNanos();
     var got_notify = false;
     var notify_event: c.XEvent = undefined;
 
     while (true) {
-        const elapsed: u64 = @intCast(@as(i128, @intCast(std.time.nanoTimestamp() - start)));
+        const elapsed: u64 = @intCast(@as(i128, @intCast(monotonicNanos() - start)));
         if (elapsed >= deadline_ns) break;
 
         // Drain any pending events; check for SelectionNotify on our window.
@@ -214,11 +226,11 @@ pub fn listFormats(alloc: Allocator) ![][]const u8 {
 
     // Wait for SelectionNotify (same 2s poll as readFormat).
     const deadline_ns: u64 = 2 * std.time.ns_per_s;
-    const start = std.time.nanoTimestamp();
+    const start = monotonicNanos();
     var got_notify = false;
     var notify_event: c.XEvent = undefined;
     while (true) {
-        const elapsed: u64 = @intCast(@as(i128, @intCast(std.time.nanoTimestamp() - start)));
+        const elapsed: u64 = @intCast(@as(i128, @intCast(monotonicNanos() - start)));
         if (elapsed >= deadline_ns) break;
 
         while (c.XPending(d) > 0) {
@@ -391,11 +403,11 @@ fn respondToSelectionRequest(ev: *c.XSelectionRequestEvent) bool {
 
 fn runSelectionServiceLoop() !void {
     const d = display orelse return ClipboardError.NoDisplayServer;
-    const start = std.time.milliTimestamp();
+    const start = monotonicMillis();
     var first_service_time: ?i64 = null;
 
     while (true) {
-        const now = std.time.milliTimestamp();
+        const now = monotonicMillis();
         if (first_service_time) |t| {
             if (now - t >= SELECTION_WRITE_GRACE_MS) return; // grace exhausted -> success
         }
@@ -414,7 +426,7 @@ fn runSelectionServiceLoop() !void {
                 c.SelectionRequest => {
                     const ok = respondToSelectionRequest(&ev.xselectionrequest);
                     if (ok and first_service_time == null) {
-                        first_service_time = std.time.milliTimestamp();
+                        first_service_time = monotonicMillis();
                     }
                 },
                 c.SelectionClear => {
@@ -476,12 +488,26 @@ const Subscriber = struct {
     userdata: ?*anyopaque,
 };
 
-var subs_mutex: std.Thread.Mutex = .{};
-var subs: std.ArrayListUnmanaged(Subscriber) = .{};
+var subs_mutex: SpinMutex = .{};
+var subs: std.ArrayListUnmanaged(Subscriber) = .empty;
 var next_sub_id: u64 = 1; // id=0 is reserved as invalid-handle sentinel
 var poll_thread: ?std.Thread = null;
-var poll_stop: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
-var change_count: std.atomic.Value(i64) = std.atomic.Value(i64).init(0);
+var poll_stop: std.atomic.Value(bool) = .init(false);
+var change_count: std.atomic.Value(i64) = .init(0);
+
+const SpinMutex = struct {
+    state: std.atomic.Value(u8) = .init(0),
+
+    fn lock(self: *SpinMutex) void {
+        while (self.state.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) {
+            std.atomic.spinLoopHint();
+        }
+    }
+
+    fn unlock(self: *SpinMutex) void {
+        self.state.store(0, .release);
+    }
+};
 
 pub fn getChangeCount() i64 {
     return change_count.load(.monotonic);
@@ -497,7 +523,8 @@ fn pollThreadMain() void {
 
     // Hidden env-var for tuning during debugging. Undocumented on purpose.
     const poll_ms: i32 = blk: {
-        const raw = std.posix.getenv("LINUX_X11_POLL_MS") orelse break :blk DEFAULT_POLL_MS;
+        const raw_ptr: [*:0]const u8 = std.c.getenv("LINUX_X11_POLL_MS") orelse break :blk DEFAULT_POLL_MS;
+        const raw = std.mem.sliceTo(raw_ptr, 0);
         break :blk std.fmt.parseInt(i32, raw, 10) catch DEFAULT_POLL_MS;
     };
 
@@ -546,18 +573,18 @@ fn hashTargets(d: *c.Display) !u64 {
     );
     _ = c.XFlush(d);
 
-    // Wait briefly for SelectionNotify. We use a 200ms budget here — longer
-    // than a happy-path roundtrip, short enough that a stuck request doesn't
-    // stall the poll thread.
-    const start = std.time.milliTimestamp();
+    // Wait briefly for SelectionNotify. We use a ~200ms budget (40 × 5ms)
+    // — longer than a happy-path roundtrip, short enough that a stuck
+    // request doesn't stall the poll thread.
     var got_notify = false;
-    while (std.time.milliTimestamp() - start < 200) {
+    var attempts: u32 = 0;
+    while (attempts < 40) : (attempts += 1) {
         var ev: c.XEvent = undefined;
         if (c.XCheckTypedWindowEvent(d, our_window, c.SelectionNotify, &ev) != 0) {
             got_notify = true;
             break;
         }
-        std.Thread.sleep(5 * std.time.ns_per_ms);
+        _ = std.c.nanosleep(&.{ .sec = 0, .nsec = 5 * std.time.ns_per_ms }, null);
     }
     if (!got_notify) return 0;
 

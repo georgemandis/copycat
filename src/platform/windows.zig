@@ -236,7 +236,7 @@ pub fn listFormats(allocator: Allocator) ![][]const u8 {
     if (OpenClipboard(null) == 0) return ClipboardError.PasteboardUnavailable;
     defer _ = CloseClipboard();
 
-    var list = std.ArrayListUnmanaged([]const u8){};
+    var list: std.ArrayListUnmanaged([]const u8) = .empty;
     errdefer {
         for (list.items) |s| allocator.free(s);
         list.deinit(allocator);
@@ -357,8 +357,22 @@ const Subscriber = struct {
     userdata: ?*anyopaque,
 };
 
-var subscribe_mutex: std.Thread.Mutex = .{};
-var subscribers: std.ArrayListUnmanaged(Subscriber) = .{};
+var subscribe_mutex: SpinMutex = .{};
+var subscribers: std.ArrayListUnmanaged(Subscriber) = .empty;
+
+const SpinMutex = struct {
+    state: std.atomic.Value(u8) = .init(0),
+
+    fn lock(self: *SpinMutex) void {
+        while (self.state.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) {
+            std.atomic.spinLoopHint();
+        }
+    }
+
+    fn unlock(self: *SpinMutex) void {
+        self.state.store(0, .release);
+    }
+};
 var next_subscriber_id: u64 = 1;
 var msg_thread: ?std.Thread = null;
 var should_exit: bool = false;

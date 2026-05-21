@@ -3,11 +3,14 @@ const clipboard = @import("clipboard");
 const web_custom_data = @import("web_custom_data");
 
 const Allocator = std.mem.Allocator;
+const Io = std.Io;
+const File = std.Io.File;
+const Dir = std.Io.Dir;
 
-fn handleTopLevelError(err: anyerror) void {
-    const stderr_file = std.fs.File.stderr();
+fn handleTopLevelError(io: Io, err: anyerror) void {
+    const stderr_file = File.stderr();
     var errbuf: [4096]u8 = undefined;
-    var ew = stderr_file.writer(&errbuf);
+    var ew = stderr_file.writerStreaming(io, &errbuf);
     switch (err) {
         error.NoDisplayServer => ew.interface.print(
             "Error: no display server available (is $WAYLAND_DISPLAY or $DISPLAY set?)\n",
@@ -30,34 +33,41 @@ fn handleTopLevelError(err: anyerror) void {
     std.process.exit(2);
 }
 
-pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+pub fn main(init: std.process.Init) !void {
+    const allocator = init.gpa;
+    const io = init.io;
 
-    const args = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, args);
+    var args_iter = std.process.Args.Iterator.init(init.minimal.args);
+    // Skip argv[0] (program name)
+    _ = args_iter.next();
+
+    // Collect remaining args into an ArrayList
+    var all_args: std.ArrayListUnmanaged([:0]const u8) = .empty;
+    defer all_args.deinit(allocator);
+    while (args_iter.next()) |arg| {
+        try all_args.append(allocator, arg);
+    }
 
     // Check for global flags: --json and --help/-h
     var json_output = false;
     var help_requested = false;
-    var filtered_args = std.array_list.Managed([]const u8).init(allocator);
-    defer filtered_args.deinit();
+    var filtered_args: std.ArrayListUnmanaged([:0]const u8) = .empty;
+    defer filtered_args.deinit(allocator);
 
-    for (args[1..]) |arg| {
+    for (all_args.items) |arg| {
         if (std.mem.eql(u8, arg, "--json")) {
             json_output = true;
         } else if (std.mem.eql(u8, arg, "--help") or std.mem.eql(u8, arg, "-h")) {
             help_requested = true;
         } else {
-            try filtered_args.append(arg);
+            try filtered_args.append(allocator, arg);
         }
     }
 
     if (help_requested) {
-        const stdout_file = std.fs.File.stdout();
+        const stdout_file = File.stdout();
         var helpbuf: [4096]u8 = undefined;
-        var hw = stdout_file.writer(&helpbuf);
+        var hw = stdout_file.writerStreaming(io, &helpbuf);
         try printUsage(&hw.interface);
         try hw.interface.flush();
         return;
@@ -66,34 +76,34 @@ pub fn main() !void {
     const cmd_args = filtered_args.items;
 
     if (cmd_args.len == 0) {
-        return introspect(allocator, json_output);
+        return introspect(allocator, io, json_output);
     }
 
     const command = cmd_args[0];
 
     if (std.mem.eql(u8, command, "help")) {
-        const stdout_file = std.fs.File.stdout();
+        const stdout_file = File.stdout();
         var helpbuf: [4096]u8 = undefined;
-        var hw = stdout_file.writer(&helpbuf);
+        var hw = stdout_file.writerStreaming(io, &helpbuf);
         try printUsage(&hw.interface);
         try hw.interface.flush();
         return;
     } else if (std.mem.eql(u8, command, "list")) {
-        return cmdList(allocator, cmd_args[1..], json_output) catch |err| return handleTopLevelError(err);
+        return cmdList(allocator, io, cmd_args[1..], json_output) catch |err| return handleTopLevelError(io, err);
     } else if (std.mem.eql(u8, command, "read")) {
-        return cmdRead(allocator, cmd_args[1..]) catch |err| return handleTopLevelError(err);
+        return cmdRead(allocator, io, cmd_args[1..]) catch |err| return handleTopLevelError(io, err);
     } else if (std.mem.eql(u8, command, "write")) {
-        return cmdWrite(allocator, cmd_args[1..]) catch |err| return handleTopLevelError(err);
+        return cmdWrite(allocator, io, cmd_args[1..]) catch |err| return handleTopLevelError(io, err);
     } else if (std.mem.eql(u8, command, "clear")) {
-        return cmdClear() catch |err| return handleTopLevelError(err);
+        return cmdClear() catch |err| return handleTopLevelError(io, err);
     } else if (std.mem.eql(u8, command, "watch")) {
-        return cmdWatch(allocator, cmd_args[1..], json_output) catch |err| return handleTopLevelError(err);
+        return cmdWatch(allocator, io, cmd_args[1..], json_output) catch |err| return handleTopLevelError(io, err);
     } else if (std.mem.eql(u8, command, "completions")) {
-        return cmdCompletions(cmd_args[1..]) catch |err| return handleTopLevelError(err);
+        return cmdCompletions(io, cmd_args[1..]) catch |err| return handleTopLevelError(io, err);
     } else {
-        const stderr_file = std.fs.File.stderr();
+        const stderr_file = File.stderr();
         var errbuf: [4096]u8 = undefined;
-        var ew = stderr_file.writer(&errbuf);
+        var ew = stderr_file.writerStreaming(io, &errbuf);
         try ew.interface.print("Unknown command: {s}\n", .{command});
         try printUsage(&ew.interface);
         try ew.interface.flush();
@@ -101,7 +111,7 @@ pub fn main() !void {
     }
 }
 
-fn printUsage(writer: *std.io.Writer) !void {
+fn printUsage(writer: *std.Io.Writer) !void {
     try writer.print(
         \\Usage: copycat [command] [options]
         \\
@@ -128,10 +138,10 @@ fn printUsage(writer: *std.io.Writer) !void {
     , .{});
 }
 
-fn introspect(allocator: Allocator, json_output: bool) !void {
-    const stdout_file = std.fs.File.stdout();
+fn introspect(allocator: Allocator, io: Io, json_output: bool) !void {
+    const stdout_file = File.stdout();
     var buf: [4096]u8 = undefined;
-    var w = stdout_file.writer(&buf);
+    var w = stdout_file.writerStreaming(io, &buf);
 
     const change_count = clipboard.getChangeCount();
     const formats = try clipboard.listFormats(allocator);
@@ -164,7 +174,7 @@ fn introspect(allocator: Allocator, json_output: bool) !void {
     try w.interface.flush();
 }
 
-fn printFormatPreview(allocator: Allocator, writer: *std.io.Writer, format: []const u8, bytes: []const u8) !void {
+fn printFormatPreview(allocator: Allocator, writer: *std.Io.Writer, format: []const u8, bytes: []const u8) !void {
     try writer.print("  {s}    {d} bytes\n", .{ format, bytes.len });
 
     // Try to parse web custom data container formats
@@ -304,7 +314,7 @@ fn resolveWebSubTypeFromArgs(allocator: Allocator, container: []const u8, sub_ty
 }
 
 /// List sub-type names for a given web custom data container format.
-fn listSubTypes(allocator: Allocator, writer: *std.io.Writer, container: []const u8) !void {
+fn listSubTypes(allocator: Allocator, writer: *std.Io.Writer, container: []const u8) !void {
     if (!isWebCustomDataFormat(container)) return;
     const data = try clipboard.readFormat(allocator, container);
     if (data) |bytes| {
@@ -352,7 +362,7 @@ fn detectType(bytes: []const u8) []const u8 {
     return "binary";
 }
 
-fn jsonIntrospect(allocator: Allocator, writer: *std.io.Writer, formats: [][]const u8, change_count: i64) !void {
+fn jsonIntrospect(allocator: Allocator, writer: *std.Io.Writer, formats: [][]const u8, change_count: i64) !void {
     try writer.print("{{\"changeCount\":{d},\"formats\":[", .{change_count});
     for (formats, 0..) |format, i| {
         if (i > 0) try writer.print(",", .{});
@@ -366,10 +376,10 @@ fn jsonIntrospect(allocator: Allocator, writer: *std.io.Writer, formats: [][]con
     try writer.print("]}}\n", .{});
 }
 
-fn cmdList(allocator: Allocator, args: []const []const u8, json_output: bool) !void {
-    const stdout_file = std.fs.File.stdout();
+fn cmdList(allocator: Allocator, io: Io, args: []const [:0]const u8, json_output: bool) !void {
+    const stdout_file = File.stdout();
     var buf: [4096]u8 = undefined;
-    var w = stdout_file.writer(&buf);
+    var w = stdout_file.writerStreaming(io, &buf);
 
     // --sub-types <format>: list only sub-type names for a container format
     var sub_types_for: ?[]const u8 = null;
@@ -425,11 +435,11 @@ fn cmdList(allocator: Allocator, args: []const []const u8, json_output: bool) !v
     try w.interface.flush();
 }
 
-fn cmdRead(allocator: Allocator, args: []const []const u8) !void {
+fn cmdRead(allocator: Allocator, io: Io, args: []const [:0]const u8) !void {
     if (args.len == 0) {
-        const stderr_file = std.fs.File.stderr();
+        const stderr_file = File.stderr();
         var errbuf: [4096]u8 = undefined;
-        var ew = stderr_file.writer(&errbuf);
+        var ew = stderr_file.writerStreaming(io, &errbuf);
         try ew.interface.print("Usage: copycat read <format> [sub-type] [--out <file>] [--as-path [-0]]\n", .{});
         try ew.interface.flush();
         std.process.exit(1);
@@ -460,9 +470,9 @@ fn cmdRead(allocator: Allocator, args: []const []const u8) !void {
     // --- Validation (runs BEFORE any pasteboard access) ---
 
     if (null_sep and !as_path) {
-        const stderr_file = std.fs.File.stderr();
+        const stderr_file = File.stderr();
         var errbuf: [4096]u8 = undefined;
-        var ew = stderr_file.writer(&errbuf);
+        var ew = stderr_file.writerStreaming(io, &errbuf);
         try ew.interface.print("Error: -0 requires --as-path\n", .{});
         try ew.interface.flush();
         std.process.exit(1);
@@ -480,17 +490,17 @@ fn cmdRead(allocator: Allocator, args: []const []const u8) !void {
         if (sub_type_result) |sub_val| {
             defer allocator.free(sub_val);
             if (out_file) |path| {
-                const file = try std.fs.cwd().createFile(path, .{});
-                defer file.close();
-                try file.writeAll(sub_val);
-                const stderr_file = std.fs.File.stderr();
+                const file = try Dir.cwd().createFile(io, path, .{});
+                defer file.close(io);
+                try file.writeStreamingAll(io, sub_val);
+                const stderr_file = File.stderr();
                 var errbuf: [4096]u8 = undefined;
-                var ew = stderr_file.writer(&errbuf);
+                var ew = stderr_file.writerStreaming(io, &errbuf);
                 try ew.interface.print("Wrote {d} bytes to {s}\n", .{ sub_val.len, path });
                 try ew.interface.flush();
             } else {
-                const stdout_file = std.fs.File.stdout();
-                try stdout_file.writeAll(sub_val);
+                const stdout_file = File.stdout();
+                try stdout_file.writeStreamingAll(io, sub_val);
             }
             return;
         }
@@ -501,22 +511,22 @@ fn cmdRead(allocator: Allocator, args: []const []const u8) !void {
             defer allocator.free(bytes);
 
             if (out_file) |path| {
-                const file = try std.fs.cwd().createFile(path, .{});
-                defer file.close();
-                try file.writeAll(bytes);
-                const stderr_file = std.fs.File.stderr();
+                const file = try Dir.cwd().createFile(io, path, .{});
+                defer file.close(io);
+                try file.writeStreamingAll(io, bytes);
+                const stderr_file = File.stderr();
                 var errbuf: [4096]u8 = undefined;
-                var ew = stderr_file.writer(&errbuf);
+                var ew = stderr_file.writerStreaming(io, &errbuf);
                 try ew.interface.print("Wrote {d} bytes to {s}\n", .{ bytes.len, path });
                 try ew.interface.flush();
             } else {
-                const stdout_file = std.fs.File.stdout();
-                try stdout_file.writeAll(bytes);
+                const stdout_file = File.stdout();
+                try stdout_file.writeStreamingAll(io, bytes);
             }
         } else {
-            const stderr_file = std.fs.File.stderr();
+            const stderr_file = File.stderr();
             var errbuf: [4096]u8 = undefined;
-            var ew = stderr_file.writer(&errbuf);
+            var ew = stderr_file.writerStreaming(io, &errbuf);
             try ew.interface.print("Format not found: {s}\n", .{format});
             try ew.interface.flush();
             std.process.exit(1);
@@ -527,9 +537,9 @@ fn cmdRead(allocator: Allocator, args: []const []const u8) !void {
     // --- --as-path path ---
 
     const paths_result = clipboard.decodePathsForFormat(allocator, format) catch |err| {
-        const stderr_file = std.fs.File.stderr();
+        const stderr_file = File.stderr();
         var errbuf: [4096]u8 = undefined;
-        var ew = stderr_file.writer(&errbuf);
+        var ew = stderr_file.writerStreaming(io, &errbuf);
         switch (err) {
             error.FormatNotFound => try ew.interface.print("Format not found: {s}\n", .{format}),
             error.NotFileScheme => try ew.interface.print("Error: {s} is not a file:// URL\n", .{format}),
@@ -561,26 +571,26 @@ fn cmdRead(allocator: Allocator, args: []const []const u8) !void {
     const terminator: u8 = if (null_sep) 0 else '\n';
 
     if (out_file) |path| {
-        const file = try std.fs.cwd().createFile(path, .{});
-        defer file.close();
+        const file = try Dir.cwd().createFile(io, path, .{});
+        defer file.close(io);
         for (paths_result) |p| {
-            try file.writeAll(p);
-            try file.writeAll(&[_]u8{terminator});
+            try file.writeStreamingAll(io, p);
+            try file.writeStreamingAll(io, &[_]u8{terminator});
         }
     } else {
-        const stdout_file = std.fs.File.stdout();
+        const stdout_file = File.stdout();
         for (paths_result) |p| {
-            try stdout_file.writeAll(p);
-            try stdout_file.writeAll(&[_]u8{terminator});
+            try stdout_file.writeStreamingAll(io, p);
+            try stdout_file.writeStreamingAll(io, &[_]u8{terminator});
         }
     }
 }
 
-fn cmdWrite(allocator: Allocator, args: []const []const u8) !void {
+fn cmdWrite(allocator: Allocator, io: Io, args: []const [:0]const u8) !void {
     if (args.len == 0) {
-        const stderr_file = std.fs.File.stderr();
+        const stderr_file = File.stderr();
         var errbuf: [4096]u8 = undefined;
-        var ew = stderr_file.writer(&errbuf);
+        var ew = stderr_file.writerStreaming(io, &errbuf);
         try ew.interface.print("Usage: copycat write <format> [--data \"text\"]\n", .{});
         try ew.interface.flush();
         std.process.exit(1);
@@ -601,8 +611,10 @@ fn cmdWrite(allocator: Allocator, args: []const []const u8) !void {
         try clipboard.writeFormat(allocator, format, data);
     } else {
         // Read from stdin
-        const stdin_file = std.fs.File.stdin();
-        const data = try stdin_file.readToEndAlloc(allocator, 1024 * 1024 * 100); // 100MB max
+        const stdin_file = File.stdin();
+        var readbuf: [4096]u8 = undefined;
+        var r = stdin_file.readerStreaming(io, &readbuf);
+        const data = try r.interface.readAlloc(allocator, 1024 * 1024 * 100); // 100MB max
         defer allocator.free(data);
         try clipboard.writeFormat(allocator, format, data);
     }
@@ -612,68 +624,64 @@ fn cmdClear() !void {
     try clipboard.clear();
 }
 
-fn cmdWatch(allocator: Allocator, args: []const []const u8, json_output: bool) !void {
+fn cmdWatch(allocator: Allocator, io: Io, args: []const [:0]const u8, json_output: bool) !void {
     _ = args; // --interval is no longer accepted; unknown args are ignored.
 
-    const stderr_file = std.fs.File.stderr();
+    const stderr_file = File.stderr();
     var stderr_buf: [4096]u8 = undefined;
-    var stderr_w = stderr_file.writer(&stderr_buf);
+    var stderr_w = stderr_file.writerStreaming(io, &stderr_buf);
     try stderr_w.interface.print("Watching clipboard (Ctrl+C to stop)...\n\n", .{});
     try stderr_w.interface.flush();
 
     var context = WatchContext{
         .allocator = allocator,
+        .io = io,
         .json_output = json_output,
-        .mutex = .{},
-        .condition = .{},
-        .pending = false,
+        .pending = .init(false),
     };
 
     const handle = try clipboard.subscribe(allocator, WatchContext.onChange, &context);
     defer clipboard.unsubscribe(handle);
 
-    // Main loop: wait for the callback to signal, introspect, loop until SIGINT.
+    // Main loop: poll for the callback signal, introspect, loop until SIGINT.
     // SIGINT handling relies on process termination — see spec's cmdWatch section.
     while (true) {
-        context.mutex.lock();
-        while (!context.pending) {
-            context.condition.wait(&context.mutex);
+        while (!context.pending.swap(false, .acq_rel)) {
+            _ = std.c.nanosleep(&.{ .sec = 0, .nsec = 50_000_000 }, null); // 50ms
         }
-        context.pending = false;
-        context.mutex.unlock();
 
-        try introspect(allocator, json_output);
+        try introspect(allocator, io, json_output);
 
-        const stdout_file = std.fs.File.stdout();
+        const stdout_file = File.stdout();
         var stdout_buf: [4096]u8 = undefined;
-        var stdout_w = stdout_file.writer(&stdout_buf);
+        var stdout_w = stdout_file.writerStreaming(io, &stdout_buf);
         try stdout_w.interface.print("---\n\n", .{});
         try stdout_w.interface.flush();
     }
 }
 
-fn cmdCompletions(args: []const []const u8) !void {
-    const stdout_file = std.fs.File.stdout();
+fn cmdCompletions(io: Io, args: []const [:0]const u8) !void {
+    const stdout_file = File.stdout();
 
     const shell = if (args.len > 0) args[0] else {
-        const stderr_file = std.fs.File.stderr();
+        const stderr_file = File.stderr();
         var errbuf: [4096]u8 = undefined;
-        var ew = stderr_file.writer(&errbuf);
+        var ew = stderr_file.writerStreaming(io, &errbuf);
         try ew.interface.print("Usage: copycat completions <fish|bash|zsh>\n", .{});
         try ew.interface.flush();
         std.process.exit(1);
     };
 
     if (std.mem.eql(u8, shell, "fish")) {
-        try stdout_file.writeAll(fish_completions);
+        try stdout_file.writeStreamingAll(io, fish_completions);
     } else if (std.mem.eql(u8, shell, "bash")) {
-        try stdout_file.writeAll(bash_completions);
+        try stdout_file.writeStreamingAll(io, bash_completions);
     } else if (std.mem.eql(u8, shell, "zsh")) {
-        try stdout_file.writeAll(zsh_completions);
+        try stdout_file.writeStreamingAll(io, zsh_completions);
     } else {
-        const stderr_file = std.fs.File.stderr();
+        const stderr_file = File.stderr();
         var errbuf: [4096]u8 = undefined;
-        var ew = stderr_file.writer(&errbuf);
+        var ew = stderr_file.writerStreaming(io, &errbuf);
         try ew.interface.print("Unknown shell: {s}. Supported: fish, bash, zsh\n", .{shell});
         try ew.interface.flush();
         std.process.exit(1);
@@ -840,16 +848,12 @@ const zsh_completions =
 
 const WatchContext = struct {
     allocator: Allocator,
+    io: Io,
     json_output: bool,
-    mutex: std.Thread.Mutex,
-    condition: std.Thread.Condition,
-    pending: bool,
+    pending: std.atomic.Value(bool),
 
     fn onChange(userdata: ?*anyopaque) void {
         const ctx: *WatchContext = @ptrCast(@alignCast(userdata.?));
-        ctx.mutex.lock();
-        defer ctx.mutex.unlock();
-        ctx.pending = true;
-        ctx.condition.signal();
+        ctx.pending.store(true, .release);
     }
 };

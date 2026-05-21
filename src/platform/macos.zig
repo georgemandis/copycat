@@ -24,11 +24,25 @@ const Subscriber = struct {
     userdata: ?*anyopaque,
 };
 
-var subscribe_mutex: std.Thread.Mutex = .{};
-var subscribers: std.ArrayListUnmanaged(Subscriber) = .{};
+var subscribe_mutex: SpinMutex = .{};
+var subscribers: std.ArrayListUnmanaged(Subscriber) = .empty;
 var next_subscriber_id: u64 = 1;
 var thread_handle: ?std.Thread = null;
-var should_exit: std.atomic.Value(bool) = std.atomic.Value(bool).init(false);
+var should_exit: std.atomic.Value(bool) = .init(false);
+
+const SpinMutex = struct {
+    state: std.atomic.Value(u8) = .init(0),
+
+    fn lock(self: *SpinMutex) void {
+        while (self.state.cmpxchgWeak(0, 1, .acquire, .monotonic) != null) {
+            std.atomic.spinLoopHint();
+        }
+    }
+
+    fn unlock(self: *SpinMutex) void {
+        self.state.store(0, .release);
+    }
+};
 
 /// Get the NSPasteboard generalPasteboard singleton. Returns null if unavailable (e.g. daemon context).
 fn getPasteboard() ?objc.id {
@@ -425,7 +439,7 @@ fn pollLoop(allocator: Allocator) void {
     var last_count: i64 = getChangeCount();
 
     while (!should_exit.load(.acquire)) {
-        std.Thread.sleep(tick_ns);
+        _ = std.c.nanosleep(&.{ .sec = 0, .nsec = @intCast(tick_ns) }, null);
         if (should_exit.load(.acquire)) break;
 
         const current = getChangeCount();
@@ -488,7 +502,7 @@ test "subscribe allocates monotonic ids and unsubscribe is idempotent" {
 
     // Reset module state for the test.
     subscribe_mutex.lock();
-    subscribers = .{};
+    subscribers = .empty;
     next_subscriber_id = 1;
     thread_handle = null;
     should_exit.store(false, .release);
