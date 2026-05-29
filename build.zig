@@ -98,6 +98,13 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    // OSC 52 escape sequence formatting (pure Zig, no OS deps)
+    const osc52_mod = b.createModule(.{
+        .root_source_file = b.path("src/osc52.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     // CLI executable
     const exe = b.addExecutable(.{
         .name = "copycat",
@@ -108,6 +115,7 @@ pub fn build(b: *std.Build) void {
             .imports = &.{
                 .{ .name = "clipboard", .module = clipboard_mod },
                 .{ .name = "web_custom_data", .module = web_custom_data_mod },
+                .{ .name = "osc52", .module = osc52_mod },
             },
         }),
     });

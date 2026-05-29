@@ -2,6 +2,7 @@ const std = @import("std");
 const builtin = @import("builtin");
 const clipboard = @import("clipboard");
 const web_custom_data = @import("web_custom_data");
+const osc52 = @import("osc52");
 
 const version = "0.3.1";
 
@@ -616,12 +617,36 @@ fn cmdWrite(allocator: Allocator, io: Io, args: []const [:0]const u8) !void {
 
     const format = args[0];
     var inline_data: ?[]const u8 = null;
+    var osc52_mode = false;
 
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
         if (std.mem.eql(u8, args[i], "--data") and i + 1 < args.len) {
             inline_data = args[i + 1];
             i += 1;
+        } else if (std.mem.eql(u8, args[i], "--osc52")) {
+            osc52_mode = true;
+        }
+    }
+
+    if (!osc52_mode) {
+        if (std.c.getenv("COPYCAT_OSC52")) |val| {
+            if (std.mem.eql(u8, std.mem.span(val), "1")) {
+                osc52_mode = true;
+            }
+        }
+    }
+
+    if (osc52_mode) {
+        if (inline_data) |data| {
+            return writeOsc52(io, data);
+        } else {
+            const stdin_file = File.stdin();
+            var readbuf: [4096]u8 = undefined;
+            var r = stdin_file.readerStreaming(io, &readbuf);
+            const data = try r.interface.readAlloc(allocator, 1024 * 1024 * 100);
+            defer allocator.free(data);
+            return writeOsc52(io, data);
         }
     }
 
@@ -636,6 +661,32 @@ fn cmdWrite(allocator: Allocator, io: Io, args: []const [:0]const u8) !void {
         defer allocator.free(data);
         try clipboard.writeFormat(allocator, format, data);
     }
+}
+
+fn writeOsc52(io: Io, data: []const u8) !void {
+    const stdout_file = File.stdout();
+
+    if (!(stdout_file.isTty(io) catch false)) {
+        const stderr_file = File.stderr();
+        var errbuf: [256]u8 = undefined;
+        var ew = stderr_file.writerStreaming(io, &errbuf);
+        try ew.interface.print("Error: --osc52 requires stdout to be a terminal\n", .{});
+        try ew.interface.flush();
+        std.process.exit(1);
+    }
+
+    if (data.len > 100 * 1024) {
+        const stderr_file = File.stderr();
+        var warnbuf: [256]u8 = undefined;
+        var ww = stderr_file.writerStreaming(io, &warnbuf);
+        try ww.interface.print("Warning: payload is large ({d} bytes); some terminals may truncate OSC 52 data\n", .{data.len});
+        try ww.interface.flush();
+    }
+
+    var buf: [4096]u8 = undefined;
+    var w = stdout_file.writerStreaming(io, &buf);
+    try osc52.formatOsc52(&w.interface, data);
+    try w.interface.flush();
 }
 
 fn cmdClear() !void {
