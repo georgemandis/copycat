@@ -16,10 +16,14 @@ fn handleTopLevelError(io: Io, err: anyerror) void {
     var errbuf: [4096]u8 = undefined;
     var ew = stderr_file.writerStreaming(io, &errbuf);
     switch (err) {
-        error.NoDisplayServer => ew.interface.print(
-            "Error: no display server available (is $WAYLAND_DISPLAY or $DISPLAY set?)\n",
-            .{},
-        ) catch {},
+        error.NoDisplayServer => {
+            ew.interface.print(
+                "Error: no display server available (is $WAYLAND_DISPLAY or $DISPLAY set?)\n\n" ++
+                    "Tip: To copy to your local terminal's clipboard over SSH, use:\n" ++
+                    "  copycat write --osc52 <format>\n",
+                .{},
+            ) catch {};
+        },
         error.SubscribeFailed => ew.interface.print(
             "Error: clipboard subscribe failed on this platform or backend\n",
             .{},
