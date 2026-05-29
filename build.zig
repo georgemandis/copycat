@@ -146,10 +146,20 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
+    const osc52_tests = b.addTest(.{
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/osc52.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+
     const run_paths_tests = b.addRunArtifact(paths_tests);
     const run_web_custom_data_tests = b.addRunArtifact(web_custom_data_tests);
+    const run_osc52_tests = b.addRunArtifact(osc52_tests);
 
     const test_step = b.step("test", "Run pure-Zig unit tests");
     test_step.dependOn(&run_paths_tests.step);
     test_step.dependOn(&run_web_custom_data_tests.step);
+    test_step.dependOn(&run_osc52_tests.step);
 }
