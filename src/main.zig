@@ -611,26 +611,19 @@ fn cmdRead(allocator: Allocator, io: Io, args: []const [:0]const u8) !void {
 }
 
 fn cmdWrite(allocator: Allocator, io: Io, args: []const [:0]const u8) !void {
-    if (args.len == 0) {
-        const stderr_file = File.stderr();
-        var errbuf: [4096]u8 = undefined;
-        var ew = stderr_file.writerStreaming(io, &errbuf);
-        try ew.interface.print("Usage: copycat write <format> [--data \"text\"]\n", .{});
-        try ew.interface.flush();
-        std.process.exit(1);
-    }
-
-    const format = args[0];
     var inline_data: ?[]const u8 = null;
     var osc52_mode = false;
+    var format: ?[]const u8 = null;
 
-    var i: usize = 1;
+    var i: usize = 0;
     while (i < args.len) : (i += 1) {
         if (std.mem.eql(u8, args[i], "--data") and i + 1 < args.len) {
             inline_data = args[i + 1];
             i += 1;
         } else if (std.mem.eql(u8, args[i], "--osc52")) {
             osc52_mode = true;
+        } else if (!std.mem.startsWith(u8, args[i], "-")) {
+            if (format == null) format = args[i];
         }
     }
 
@@ -640,6 +633,15 @@ fn cmdWrite(allocator: Allocator, io: Io, args: []const [:0]const u8) !void {
                 osc52_mode = true;
             }
         }
+    }
+
+    if (format == null and !osc52_mode) {
+        const stderr_file = File.stderr();
+        var errbuf: [4096]u8 = undefined;
+        var ew = stderr_file.writerStreaming(io, &errbuf);
+        try ew.interface.print("Usage: copycat write <format> [--data \"text\"] [--osc52]\n", .{});
+        try ew.interface.flush();
+        std.process.exit(1);
     }
 
     if (osc52_mode) {
@@ -655,8 +657,17 @@ fn cmdWrite(allocator: Allocator, io: Io, args: []const [:0]const u8) !void {
         }
     }
 
+    const fmt = format orelse {
+        const stderr_file = File.stderr();
+        var errbuf: [4096]u8 = undefined;
+        var ew = stderr_file.writerStreaming(io, &errbuf);
+        try ew.interface.print("Usage: copycat write <format> [--data \"text\"] [--osc52]\n", .{});
+        try ew.interface.flush();
+        std.process.exit(1);
+    };
+
     if (inline_data) |data| {
-        try clipboard.writeFormat(allocator, format, data);
+        try clipboard.writeFormat(allocator, fmt, data);
     } else {
         // Read from stdin
         const stdin_file = File.stdin();
@@ -664,7 +675,7 @@ fn cmdWrite(allocator: Allocator, io: Io, args: []const [:0]const u8) !void {
         var r = stdin_file.readerStreaming(io, &readbuf);
         const data = try r.interface.readAlloc(allocator, 1024 * 1024 * 100); // 100MB max
         defer allocator.free(data);
-        try clipboard.writeFormat(allocator, format, data);
+        try clipboard.writeFormat(allocator, fmt, data);
     }
 }
 
