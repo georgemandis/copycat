@@ -145,6 +145,7 @@ fn printUsage(writer: *std.Io.Writer) !void {
         \\       [--out <file>]             Write output to a file instead
         \\       [--as-path [-0]]           Decode file-reference formats to POSIX paths
         \\  write <format> [--data <text>]  Write inline data, or read from stdin
+        \\       [--osc52]                  Write via OSC 52 escape (for SSH; format ignored)
         \\  clear                           Clear the clipboard
         \\  watch                           Watch for clipboard changes (event-driven)
         \\  completions <shell>             Print shell completions (fish, bash, zsh)
@@ -797,6 +798,7 @@ const fish_completions =
     \\# write: first arg = format
     \\complete -c copycat -n "__fish_seen_subcommand_from write; and test (count (commandline -opc)) -eq 2" -a "(copycat list 2>/dev/null | grep -v '^  ')" -d "Clipboard format"
     \\complete -c copycat -n "__fish_seen_subcommand_from write" -l data -r -d "Inline data"
+    \\complete -c copycat -n "__fish_seen_subcommand_from write" -l osc52 -d "Write via OSC 52 escape"
     \\
     \\# list flags
     \\complete -c copycat -n "__fish_seen_subcommand_from list" -l sub-types -r -a "(copycat list 2>/dev/null | grep -v '^  ')" -d "List sub-types for format"
@@ -840,7 +842,7 @@ const bash_completions =
     \\            if [[ $cword -eq 2 ]]; then
     \\                local formats
     \\                formats=$(copycat list 2>/dev/null | grep -v '^  ')
-    \\                COMPREPLY=($(compgen -W "$formats --data" -- "$cur"))
+    \\                COMPREPLY=($(compgen -W "$formats --data --osc52" -- "$cur"))
     \\            fi
     \\            ;;
     \\        list)
@@ -905,6 +907,7 @@ const zsh_completions =
     \\                        formats=(${(f)"$(copycat list 2>/dev/null | grep -v '^  ')"})
     \\                        _describe 'format' formats
     \\                    fi
+    \\                    _arguments '--data[Inline data]:data:' '--osc52[Write via OSC 52 escape]'
     \\                    ;;
     \\                list)
     \\                    _arguments '--sub-types[List sub-types]:format:($(copycat list 2>/dev/null | grep -v "^  "))'
