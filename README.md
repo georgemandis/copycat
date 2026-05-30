@@ -25,8 +25,8 @@ scoop install georgemandis/copycat
 
 ```bash
 # Download the .deb for your architecture (amd64 or arm64)
-curl -LO https://github.com/georgemandis/copycat/releases/download/v0.1.0/copycat_0.1.0_amd64.deb
-sudo dpkg -i copycat_0.1.0_amd64.deb
+curl -LO https://github.com/georgemandis/copycat/releases/download/v0.4.4/copycat_0.4.4_amd64.deb
+sudo dpkg -i copycat_0.4.4_amd64.deb
 ```
 
 ### Pre-built binaries
@@ -386,6 +386,32 @@ On macOS, formats are [Uniform Type Identifiers](https://developer.apple.com/doc
 | File URL | `public.file-url` |
 
 Apps may also register custom UTIs (e.g. `com.google.docs.clipboard`, `com.adobe.photoshop.image`). Use `copycat list` to see what's actually on the clipboard at any moment.
+
+On Windows, formats are identified by name. Standard formats use `CF_*` names:
+
+| Format | Name |
+|--------|------|
+| Plain text (ANSI) | `CF_TEXT` |
+| Plain text (Unicode) | `CF_UNICODETEXT` |
+| OEM text | `CF_OEMTEXT` |
+| Bitmap (DIB) | `CF_DIB` |
+| Bitmap (DIBv5) | `CF_DIBV5` |
+| File list | `CF_HDROP` |
+| Locale | `CF_LOCALE` |
+
+Apps also register custom named formats (e.g. `HTML Format`, `PNG`, `Chromium Web Custom MIME Data Format`).
+
+> **Note: CF_DIB and BMP files.** When you copy an image on Windows, the clipboard stores it as `CF_DIB` — a raw Device-Independent Bitmap (a [`BITMAPINFOHEADER`](https://learn.microsoft.com/en-us/windows/win32/api/wingdi/ns-wingdi-bitmapinfoheader) followed by pixel data). This is **not** a complete `.bmp` file — BMP files require an additional 14-byte [`BITMAPFILEHEADER`](https://learn.microsoft.com/en-us/windows/win32/api/wingdi/ns-wingdi-bitmapfileheader) prefix. If you save `copycat read CF_DIB --out image.bmp`, image viewers won't open it. To create a valid BMP, you'd need to prepend the file header yourself. Some formats like `PNG` (when available from apps like Chromium) are self-contained and can be saved directly.
+
+On Linux (X11/Wayland), formats are MIME types:
+
+| Format | MIME type |
+|--------|-----------|
+| Plain text | `text/plain` |
+| UTF-8 text | `text/plain;charset=utf-8` or `UTF8_STRING` |
+| HTML | `text/html` |
+| PNG | `image/png` |
+| File list | `text/uri-list` |
 
 ## Roadmap
 
