@@ -247,6 +247,11 @@ pub fn listFormats(allocator: Allocator) ![][]const u8 {
         fmt = EnumClipboardFormats(fmt);
         if (fmt == 0) break; // no more formats (or error; treat as end)
 
+        // Skip GDI handle formats — they can't be read as raw bytes and
+        // their data is available through memory-based equivalents
+        // (e.g. CF_BITMAP data is accessible via CF_DIB/CF_DIBV5).
+        if (isHandleFormat(fmt)) continue;
+
         const name = formatIdToName(allocator, fmt) catch continue;
         errdefer allocator.free(name);
         try list.append(allocator, name);
@@ -259,18 +264,49 @@ pub fn listFormats(allocator: Allocator) ![][]const u8 {
 // readFormat
 // ---------------------------------------------------------------------------
 
+/// Clipboard format IDs that use GDI/kernel object handles instead of
+/// GlobalAlloc'd memory. Calling GlobalLock/GlobalSize on these is
+/// undefined behavior and will segfault.
+///
+/// There is no Win32 API to query whether a format uses a GDI handle or
+/// HGLOBAL — the handle type is determined solely by the format ID. This
+/// list is exhaustive per Microsoft's documentation:
+/// https://learn.microsoft.com/en-us/windows/win32/dataxchg/standard-clipboard-formats
+///
+/// Data is NOT lost by skipping these: Windows automatically synthesizes
+/// memory-based equivalents (e.g. CF_BITMAP ↔ CF_DIB ↔ CF_DIBV5), so
+/// the same image data is readable through the CF_DIB/CF_DIBV5 formats.
+const CF_BITMAP_ID: UINT = 2;
+const CF_METAFILEPICT_ID: UINT = 3;
+const CF_PALETTE_ID: UINT = 9;
+const CF_ENHMETAFILE_ID: UINT = 14;
+const CF_OWNERDISPLAY_ID: UINT = 0x0080; // hMem is always NULL
+const CF_DSPBITMAP_ID: UINT = 0x0082; // display variant of CF_BITMAP
+const CF_DSPMETAFILEPICT_ID: UINT = 0x0083; // display variant of CF_METAFILEPICT
+const CF_DSPENHMETAFILE_ID: UINT = 0x008E; // display variant of CF_ENHMETAFILE
+
+fn isHandleFormat(id: UINT) bool {
+    return id == CF_BITMAP_ID or id == CF_METAFILEPICT_ID or
+        id == CF_PALETTE_ID or id == CF_ENHMETAFILE_ID or
+        id == CF_OWNERDISPLAY_ID or id == CF_DSPBITMAP_ID or
+        id == CF_DSPMETAFILEPICT_ID or id == CF_DSPENHMETAFILE_ID;
+}
+
 /// Read raw bytes for a named clipboard format.
 /// Returns null if the format is not present on the clipboard.
 /// Caller owns the returned slice.
 pub fn readFormat(allocator: Allocator, format: []const u8) !?[]const u8 {
     const fmt_id = try formatNameToId(allocator, format);
 
+    // GDI handle formats can't be read as raw bytes via GlobalLock.
+    if (isHandleFormat(fmt_id)) return null;
+
     if (OpenClipboard(null) == .FALSE) return ClipboardError.PasteboardUnavailable;
     defer _ = CloseClipboard();
 
     const hdata = GetClipboardData(fmt_id) orelse return null; // format not present
 
-    const ptr = GlobalLock(hdata) orelse return ClipboardError.PasteboardUnavailable;
+    const ptr = GlobalLock(hdata) orelse return null;
     defer _ = GlobalUnlock(hdata);
 
     const size = GlobalSize(hdata);

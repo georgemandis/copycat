@@ -4,7 +4,7 @@ const clipboard = @import("clipboard");
 const web_custom_data = @import("web_custom_data");
 const osc52 = @import("osc52");
 
-const version = "0.4.3";
+const version = "0.4.4";
 
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -737,7 +737,12 @@ fn cmdWatch(allocator: Allocator, io: Io, args: []const [:0]const u8, json_outpu
             try std.Io.sleep(io, std.Io.Duration.fromMilliseconds(50), .awake);
         }
 
-        try introspect(allocator, io, json_output);
+        introspect(allocator, io, json_output) catch |err| {
+            // Clipboard may be briefly locked by another app (e.g. during
+            // delayed rendering). Skip this update and wait for the next.
+            if (err == error.PasteboardUnavailable) continue;
+            return err;
+        };
 
         const stdout_file = File.stdout();
         var stdout_buf: [4096]u8 = undefined;
