@@ -24,6 +24,10 @@ pub const ClipboardSourceInfo = extern struct {
     status: i32,
 };
 
+pub fn deinit() void {
+    if (@hasDecl(platform, "deinit")) platform.deinit();
+}
+
 pub fn listFormats(allocator: Allocator) ![][]const u8 {
     return platform.listFormats(allocator);
 }

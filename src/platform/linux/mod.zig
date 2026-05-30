@@ -43,6 +43,10 @@ fn ensureInit(alloc: Allocator) void {
     x11_ready = x11.tryOpenDisplay(alloc);
 }
 
+pub fn deinit() void {
+    if (x11_ready) x11.deinit();
+}
+
 pub fn listFormats(allocator: Allocator) ![][]const u8 {
     ensureInit(allocator);
     if (x11_ready) return x11.listFormats(allocator);

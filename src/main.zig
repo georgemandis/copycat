@@ -4,7 +4,7 @@ const clipboard = @import("clipboard");
 const web_custom_data = @import("web_custom_data");
 const osc52 = @import("osc52");
 
-const version = "0.4.2";
+const version = "0.4.3";
 
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -44,6 +44,8 @@ fn handleTopLevelError(io: Io, err: anyerror) void {
 pub fn main(init: std.process.Init) !void {
     const allocator = init.gpa;
     const io = init.io;
+
+    defer clipboard.deinit();
 
     var args_iter = try std.process.Args.Iterator.initAllocator(init.minimal.args, allocator);
     defer args_iter.deinit();

@@ -46,7 +46,6 @@ var atom_cache_mutex: SpinMutex = .{};
 var atom_cache: std.ArrayListUnmanaged(AtomEntry) = .empty;
 // Module-level allocator for backend-private state: atom cache, subscriber
 // registry, module-owned format buffers. Set once by `tryOpenDisplay`.
-// Long-lived -- not freed until process exit (backend state lives forever).
 var mod_allocator: ?Allocator = null;
 
 // ---------------------------------------------------------------------------
@@ -58,6 +57,10 @@ var mod_allocator: ?Allocator = null;
 /// if XOpenDisplay fails. `alloc` is stored in the module-level `mod_allocator`
 /// and used for every backend-private allocation for the life of the process.
 pub fn tryOpenDisplay(alloc: Allocator) bool {
+    // Must be called before any other Xlib function when using multiple
+    // threads (the subscribe poll thread reads X events concurrently).
+    _ = c.XInitThreads();
+
     const d = c.XOpenDisplay(null) orelse return false;
     display = d;
     mod_allocator = alloc;
@@ -112,6 +115,12 @@ fn atomFor(mime: []const u8) ?c.Atom {
         alloc.free(mime_copy);
     };
     return atom;
+}
+
+pub fn deinit() void {
+    const alloc = mod_allocator orelse return;
+    for (atom_cache.items) |e| alloc.free(e.mime);
+    atom_cache.deinit(alloc);
 }
 
 // ---------------------------------------------------------------------------
