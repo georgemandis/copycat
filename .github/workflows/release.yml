@@ -33,9 +33,9 @@ jobs:
         run: |
           rm -rf zig-out
           if [ -n "${{ matrix.target }}" ]; then
-            zig build -Dtarget=${{ matrix.target }} ${{ matrix.build_flags }}
+            zig build -Doptimize=ReleaseSafe -Dtarget=${{ matrix.target }} ${{ matrix.build_flags }}
           else
-            zig build
+            zig build -Doptimize=ReleaseSafe
           fi
 
       - name: Package archive
@@ -77,7 +77,7 @@ jobs:
       - name: Build
         run: |
           rm -rf zig-out
-          zig build -Dtarget=${{ matrix.zig_target }}
+          zig build -Doptimize=ReleaseSafe -Dtarget=${{ matrix.zig_target }}
 
       - name: Package archive
         run: |
@@ -134,7 +134,7 @@ jobs:
       - name: Build
         run: |
           rm -rf zig-out
-          zig build -Dtarget=x86_64-windows
+          zig build -Doptimize=ReleaseSafe -Dtarget=x86_64-windows
 
       - name: Package archive
         run: |
