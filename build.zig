@@ -31,6 +31,17 @@ pub fn build(b: *std.Build) void {
         },
         .linux => {
             clipboard_mod.link_libc = true;
+
+            // When cross-compiling (e.g. pinning glibc version with
+            // -Dtarget=x86_64-linux-gnu.2.31), Zig won't search the
+            // default system library paths. Add them explicitly so
+            // that X11 and Wayland .so files are found.
+            if (!is_native) {
+                clipboard_mod.addLibraryPath(.{ .cwd_relative = "/usr/lib/x86_64-linux-gnu" });
+                clipboard_mod.addLibraryPath(.{ .cwd_relative = "/usr/lib/aarch64-linux-gnu" });
+                clipboard_mod.addIncludePath(.{ .cwd_relative = "/usr/include" });
+            }
+
             clipboard_mod.linkSystemLibrary("X11", .{});
             clipboard_mod.linkSystemLibrary("wayland-client", .{});
 
