@@ -90,6 +90,7 @@ Clipboard contents (3 formats, changeCount: 142):
 | `copycat read <format> --out <file>` | Write raw bytes to a file |
 | `copycat write <format>` | Read data from stdin, write to clipboard |
 | `copycat write <format> --data "text"` | Write inline string data |
+| `copycat write <format> --osc52` | Write via OSC 52 escape (for SSH) |
 | `copycat clear` | Clear the clipboard |
 | `copycat watch` | Print on every clipboard change (default 500ms poll) |
 | `copycat watch --interval <ms>` | Poll with custom interval |
@@ -135,6 +136,28 @@ copycat --json > before.json
 # ... do the thing ...
 copycat --json > after.json
 diff before.json after.json
+```
+
+### Remote clipboard (OSC 52)
+
+When working over SSH, you can use the `--osc52` flag to copy data to your **local** machine's clipboard via an [OSC 52](https://invisible-island.net/xterm/ctlseqs/ctlseqs.html#h3-Operating-System-Commands) terminal escape sequence. Most modern terminals (iTerm2, kitty, alacritty, WezTerm, foot, tmux with `set-clipboard on`) support this.
+
+```sh
+# On a remote machine over SSH:
+copycat write --osc52 public.utf8-plain-text --data "hello from the server"
+
+# Or via environment variable (useful in .bashrc / .zshrc):
+export COPYCAT_OSC52=1
+echo "hello" | copycat write public.utf8-plain-text
+```
+
+If you try to write to the clipboard on a headless Linux box without `--osc52`, copycat will suggest it:
+
+```
+Error: no display server available (is $WAYLAND_DISPLAY or $DISPLAY set?)
+
+Tip: To copy to your local terminal's clipboard over SSH, use:
+  copycat write --osc52 <format>
 ```
 
 ## C ABI
@@ -322,6 +345,7 @@ src/
 ├── lib.zig               # C ABI exports for the shared library
 ├── main.zig              # CLI entry point
 ├── objc.zig              # Objective-C runtime helpers (msgSend, NSString/NSData/NSArray bridging)
+├── osc52.zig             # OSC 52 terminal escape sequence formatting (pure Zig, no OS deps)
 ├── paths.zig             # File URL / path decoding (pure Zig, no OS deps)
 └── platform/
     ├── macos.zig         # NSPasteboard backend
@@ -371,5 +395,6 @@ Apps may also register custom UTIs (e.g. `com.google.docs.clipboard`, `com.adobe
 - [x] CLI tool with introspection, list, read, write, clear, watch
 - [x] C ABI shared library
 - [x] Bun and Node.js FFI examples
+- [x] OSC 52 support for remote clipboard access over SSH
 - [ ] Multi-item clipboard support (currently reads only the first item)
 - [ ] Image format conversion helpers (e.g. TIFF ↔ PNG on macOS)

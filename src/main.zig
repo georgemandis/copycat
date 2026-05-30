@@ -4,7 +4,7 @@ const clipboard = @import("clipboard");
 const web_custom_data = @import("web_custom_data");
 const osc52 = @import("osc52");
 
-const version = "0.3.1";
+const version = "0.4.0";
 
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
