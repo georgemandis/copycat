@@ -1,5 +1,6 @@
 .{
     .name = .copycat,
+    .fingerprint = 0x506aa1ea60be0088,
     .version = "0.0.1",
     .minimum_zig_version = "0.16.0",
     .paths = .{""},
