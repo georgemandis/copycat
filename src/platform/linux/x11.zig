@@ -16,10 +16,6 @@ fn monotonicNanos() i128 {
     return @as(i128, ts.sec) * std.time.ns_per_s + ts.nsec;
 }
 
-/// Returns monotonic milliseconds, suitable for measuring elapsed time.
-fn monotonicMillis() i64 {
-    return @intCast(@divFloor(monotonicNanos(), std.time.ns_per_ms));
-}
 
 var display: ?*c.Display = null;
 var our_window: c.Window = 0;
@@ -29,13 +25,35 @@ var our_property_atom: c.Atom = 0; // used as the property name for XConvertSele
 var utf8_string_atom: c.Atom = 0;
 var incr_atom: c.Atom = 0;
 
-// The pairs currently being served. Borrowed from the caller for the
-// duration of the writeFormat/writeMultiple call.
-var write_pairs: []const mod.FormatDataPair = &.{};
-// Parallel array of pre-interned atoms for each pair's format string, so the
-// SelectionRequest handler doesn't need to re-intern on every paste. Owned
-// by the module-level allocator for the duration of the write call.
-var write_atoms: []c.Atom = &.{};
+// The clipboard data we currently own and serve to requestors.
+//
+// Unlike the old design (which borrowed the caller's slices and blocked in
+// writeMultiple serving requests for a few seconds, then returned while still
+// owning the selection with nobody answering — so pastes silently vanished),
+// this is a MODULE-OWNED deep copy that lives until we're asked to give up the
+// selection (SelectionClear) or a new write replaces it. The persistent poll
+// thread serves SelectionRequests against it for the whole process lifetime.
+//
+// Guarded by write_mutex because the poll thread reads it while foreground
+// writeMultiple calls replace it.
+const OwnedPair = struct {
+    format: []u8, // heap copy of the format string
+    data: []u8, // heap copy of the bytes
+    atom: c.Atom,
+};
+var write_mutex: SpinMutex = .{};
+var owned_pairs: []OwnedPair = &.{};
+
+/// Free the currently-owned pairs. Caller must hold write_mutex.
+fn freeOwnedPairsLocked() void {
+    const our = mod_allocator orelse return;
+    for (owned_pairs) |p| {
+        our.free(p.format);
+        our.free(p.data);
+    }
+    if (owned_pairs.len > 0) our.free(owned_pairs);
+    owned_pairs = &.{};
+}
 
 // MIME-type -> atom cache. Populated lazily.
 const AtomEntry = struct {
@@ -121,6 +139,9 @@ pub fn deinit() void {
     const alloc = mod_allocator orelse return;
     for (atom_cache.items) |e| alloc.free(e.mime);
     atom_cache.deinit(alloc);
+    write_mutex.lock();
+    freeOwnedPairsLocked();
+    write_mutex.unlock();
 }
 
 // ---------------------------------------------------------------------------
@@ -338,9 +359,6 @@ pub fn clear() !void {
 // writeFormat / writeMultiple via SelectionRequest service loop
 // ---------------------------------------------------------------------------
 
-const SELECTION_WRITE_TIMEOUT_MS: i64 = 5_000;
-const SELECTION_WRITE_GRACE_MS: i64 = 500;
-
 fn respondToSelectionRequest(ev: *c.XSelectionRequestEvent) bool {
     const alloc = mod_allocator orelse return false;
 
@@ -354,13 +372,17 @@ fn respondToSelectionRequest(ev: *c.XSelectionRequestEvent) bool {
     reply.time = ev.time;
     reply.property = 0; // default: refused
 
+    // Read owned_pairs under the mutex (the foreground thread may replace it).
+    write_mutex.lock();
+    defer write_mutex.unlock();
+
     // If the requestor asked for TARGETS, answer with the list of formats
     // we're currently serving PLUS the always-present TARGETS atom itself.
     if (ev.target == targets_atom) {
-        const buf = alloc.alloc(c.Atom, write_atoms.len + 1) catch return false;
+        const buf = alloc.alloc(c.Atom, owned_pairs.len + 1) catch return false;
         defer alloc.free(buf);
         buf[0] = targets_atom;
-        @memcpy(buf[1..], write_atoms);
+        for (owned_pairs, 0..) |p, i| buf[i + 1] = p.atom;
 
         _ = c.XChangeProperty(
             ev.display,
@@ -376,14 +398,14 @@ fn respondToSelectionRequest(ev: *c.XSelectionRequestEvent) bool {
     } else {
         // Match the request target against one of our stored format atoms.
         var matched: ?usize = null;
-        for (write_atoms, 0..) |a, i| {
-            if (a == ev.target) {
+        for (owned_pairs, 0..) |p, i| {
+            if (p.atom == ev.target) {
                 matched = i;
                 break;
             }
         }
         if (matched) |idx| {
-            const bytes = write_pairs[idx].data;
+            const bytes = owned_pairs[idx].data;
             _ = c.XChangeProperty(
                 ev.display,
                 ev.requestor,
@@ -410,42 +432,8 @@ fn respondToSelectionRequest(ev: *c.XSelectionRequestEvent) bool {
     return reply.property != 0;
 }
 
-fn runSelectionServiceLoop() !void {
-    const d = display orelse return ClipboardError.NoDisplayServer;
-    const start = monotonicMillis();
-    var first_service_time: ?i64 = null;
-
-    while (true) {
-        const now = monotonicMillis();
-        if (first_service_time) |t| {
-            if (now - t >= SELECTION_WRITE_GRACE_MS) return; // grace exhausted -> success
-        }
-        if (now - start >= SELECTION_WRITE_TIMEOUT_MS) {
-            return; // No one pasted -- still a successful write (clipboard is owned).
-        }
-
-        const fd = c.ConnectionNumber(d);
-        var pfd = [_]std.posix.pollfd{.{ .fd = fd, .events = std.posix.POLL.IN, .revents = 0 }};
-        _ = std.posix.poll(&pfd, 100) catch return ClipboardError.PasteboardUnavailable;
-
-        while (c.XPending(d) > 0) {
-            var ev: c.XEvent = undefined;
-            _ = c.XNextEvent(d, &ev);
-            switch (ev.type) {
-                c.SelectionRequest => {
-                    const ok = respondToSelectionRequest(&ev.xselectionrequest);
-                    if (ok and first_service_time == null) {
-                        first_service_time = monotonicMillis();
-                    }
-                },
-                c.SelectionClear => {
-                    return; // Another client took ownership. Successful exit.
-                },
-                else => {},
-            }
-        }
-    }
-}
+// (Selection serving now lives permanently in pollThreadMain; the old
+// time-boxed runSelectionServiceLoop that blocked writeMultiple was removed.)
 
 pub fn writeFormat(alloc: Allocator, format: []const u8, data: []const u8) !void {
     const pair = mod.FormatDataPair{ .format = format, .data = data };
@@ -458,33 +446,50 @@ pub fn writeMultiple(alloc: Allocator, pairs: []const mod.FormatDataPair) !void 
     const d = display orelse return ClipboardError.NoDisplayServer;
     const our = mod_allocator orelse return ClipboardError.NoDisplayServer;
 
-    // Intern atoms for every format up front.
-    const atoms = try our.alloc(c.Atom, pairs.len);
-    defer our.free(atoms);
+    // Deep-copy the caller's pairs into module-owned storage. The caller's
+    // slices are only valid for the duration of this call, but we must keep
+    // serving this data long after we return, so we own our own copies.
+    var new_pairs = try our.alloc(OwnedPair, pairs.len);
+    // On any failure partway through, free what we allocated so far.
+    var built: usize = 0;
+    errdefer {
+        for (new_pairs[0..built]) |p| {
+            our.free(p.format);
+            our.free(p.data);
+        }
+        our.free(new_pairs);
+    }
     for (pairs, 0..) |p, i| {
+        const fmt_copy = try our.dupe(u8, p.format);
+        errdefer our.free(fmt_copy);
+        const data_copy = try our.dupe(u8, p.data);
+        // Intern the atom (needs a NUL-terminated string).
         const fmt_z = try our.dupeZ(u8, p.format);
         defer our.free(fmt_z);
-        atoms[i] = c.XInternAtom(d, fmt_z.ptr, c.False);
+        const atom = c.XInternAtom(d, fmt_z.ptr, c.False);
+        new_pairs[i] = .{ .format = fmt_copy, .data = data_copy, .atom = atom };
+        built += 1;
     }
 
-    // Install module state for the service loop.
-    write_pairs = pairs;
-    write_atoms = atoms;
-    defer {
-        write_pairs = &.{};
-        write_atoms = &.{};
+    // Swap the new data in, freeing whatever we were serving before. Hold the
+    // mutex so the poll thread never observes a torn/partly-freed set.
+    {
+        write_mutex.lock();
+        defer write_mutex.unlock();
+        freeOwnedPairsLocked();
+        owned_pairs = new_pairs;
     }
 
-    // Claim ownership of CLIPBOARD.
+    // Claim ownership of CLIPBOARD and verify the server granted it.
     _ = c.XSetSelectionOwner(d, clipboard_atom, our_window, c.CurrentTime);
     _ = c.XFlush(d);
-
-    // Verify the server actually granted ownership.
     const actual = c.XGetSelectionOwner(d, clipboard_atom);
     if (actual != our_window) return ClipboardError.WriteFailed;
 
-    // Block until timeout / grace window / SelectionClear.
-    try runSelectionServiceLoop();
+    // Ensure the persistent poll thread is running: it services the
+    // SelectionRequests that deliver this data to whoever pastes, for the whole
+    // process lifetime. Return immediately — no blocking service loop.
+    ensurePollThread();
 }
 
 // ---------------------------------------------------------------------------
@@ -518,7 +523,25 @@ const SpinMutex = struct {
     }
 };
 
+/// Start the background poll thread if it isn't already running. The thread is
+/// what makes `change_count` live (it hashes TARGETS and bumps the counter on
+/// change). Idempotent and safe to call from any FFI entry point.
+fn ensurePollThread() void {
+    subs_mutex.lock();
+    defer subs_mutex.unlock();
+    if (poll_thread == null) {
+        poll_stop.store(false, .release);
+        poll_thread = std.Thread.spawn(.{}, pollThreadMain, .{}) catch null;
+    }
+}
+
 pub fn getChangeCount() i64 {
+    // Lazily start the poll thread so change_count becomes live on first query,
+    // matching the macOS backend's passive NSPasteboard.changeCount semantics.
+    // Schrödinger's clipboard monitor polls change_count without ever calling
+    // subscribe(); without this, the counter would stay 0 forever and no
+    // history would ever be captured on Linux.
+    ensurePollThread();
     return change_count.load(.monotonic);
 }
 
@@ -538,10 +561,28 @@ fn pollThreadMain() void {
     };
 
     while (!poll_stop.load(.acquire)) {
-        // Drain any stray events without blocking.
+        // Drain pending events. This thread is now also the persistent
+        // selection service: we answer SelectionRequests for the data we own
+        // (a paste from another app) and release our data on SelectionClear
+        // (another app took the clipboard). Previously these events were
+        // discarded, so a write's data was only served during writeMultiple's
+        // brief blocking window and then vanished.
         while (c.XPending(d) > 0) {
             var ev: c.XEvent = undefined;
             _ = c.XNextEvent(d, &ev);
+            switch (ev.type) {
+                c.SelectionRequest => {
+                    _ = respondToSelectionRequest(&ev.xselectionrequest);
+                },
+                c.SelectionClear => {
+                    if (ev.xselectionclear.window == our_window) {
+                        write_mutex.lock();
+                        freeOwnedPairsLocked();
+                        write_mutex.unlock();
+                    }
+                },
+                else => {},
+            }
         }
 
         // Query current owner + targets.
@@ -657,6 +698,8 @@ pub fn subscribe(
         return ClipboardError.SubscribeFailed;
     };
 
+    // Start the poll thread while we hold subs_mutex (ensurePollThread would
+    // re-lock, so start it inline here to avoid a double-lock).
     if (poll_thread == null) {
         poll_stop.store(false, .release);
         poll_thread = std.Thread.spawn(.{}, pollThreadMain, .{}) catch {

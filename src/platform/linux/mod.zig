@@ -80,6 +80,11 @@ pub fn clear() !void {
 }
 
 pub fn getChangeCount() i64 {
+    // Lazily initialize so the very first call (Schrödinger's monitor polls
+    // change_count before any other clipboard call) opens the display and lets
+    // x11.getChangeCount start the poll thread. Without this, change_count
+    // returned 0 forever on Linux and no history was ever captured.
+    if (!init_done) ensureInit(std.heap.c_allocator);
     if (x11_ready) return x11.getChangeCount();
     return 0;
 }
