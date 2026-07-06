@@ -313,6 +313,16 @@ pub fn readFormat(allocator: Allocator, format: []const u8) !?[]const u8 {
     if (size == 0) return try allocator.alloc(u8, 0);
 
     const bytes: [*]const u8 = @ptrCast(ptr);
+
+    // Decode from the Windows on-the-wire encoding back to UTF-8 / raw HTML.
+    // Note GlobalSize returns the *allocation* size, which may be rounded up
+    // past the real data; the CF_UNICODETEXT decoder stops at the NUL and the
+    // CF_HTML decoder uses the header's EndFragment offset, so trailing slack
+    // is handled. For untransformed formats we return the raw bytes as-is.
+    if (decodeForRead(allocator, fmt_id, bytes[0..size]) catch null) |decoded| {
+        return decoded;
+    }
+
     const result = try allocator.alloc(u8, size);
     @memcpy(result, bytes[0..size]);
     return result;
@@ -323,18 +333,157 @@ pub fn readFormat(allocator: Allocator, format: []const u8) !?[]const u8 {
 // These are implemented in later tasks.
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Encoding transforms at the Win32 boundary.
+//
+// The rest of Schrödinger/copycat speaks UTF-8 and passes HTML as a raw
+// fragment, but Windows clipboard formats have their own on-the-wire encodings:
+//   - CF_UNICODETEXT is UTF-16LE with a NUL terminator (NOT UTF-8).
+//   - "HTML Format" is a registered format that requires the CF_HTML header
+//     (Version/StartHTML/EndHTML/StartFragment/EndFragment byte offsets)
+//     wrapping the fragment; apps ignore raw HTML without it.
+// We transcode here on write and reverse it on read, so callers stay in UTF-8
+// and never see the Windows-specific framing.
+// ---------------------------------------------------------------------------
+
+/// Transform outgoing bytes for a given format ID into the encoding Windows
+/// expects. Returns owned bytes the caller must free, or null to write `data`
+/// unchanged (no transform for this format).
+fn encodeForWrite(allocator: Allocator, fmt_id: UINT, data: []const u8) !?[]u8 {
+    if (fmt_id == 13) { // CF_UNICODETEXT
+        // UTF-8 -> UTF-16LE, NUL-terminated.
+        const units = try std.unicode.utf8ToUtf16LeAlloc(allocator, data);
+        defer allocator.free(units);
+        var out = try allocator.alloc(u8, (units.len + 1) * 2);
+        for (units, 0..) |u, i| std.mem.writeInt(u16, out[i * 2 ..][0..2], u, .little);
+        std.mem.writeInt(u16, out[units.len * 2 ..][0..2], 0, .little); // NUL
+        return out;
+    }
+    if (isHtmlFormatId(fmt_id)) {
+        return try wrapCfHtml(allocator, data);
+    }
+    return null;
+}
+
+/// Reverse of encodeForWrite for reads. Returns owned bytes or null for "no
+/// transform" (return the raw bytes as-is).
+fn decodeForRead(allocator: Allocator, fmt_id: UINT, data: []const u8) !?[]u8 {
+    if (fmt_id == 13) { // CF_UNICODETEXT: UTF-16LE -> UTF-8.
+        // GlobalSize may over-report (allocation size, not string length), so
+        // stop at the FIRST NUL rather than assuming exactly one trailing NUL —
+        // otherwise trailing slack bytes would be decoded as garbage.
+        const max_units = data.len / 2;
+        var unit_len: usize = 0;
+        while (unit_len < max_units) : (unit_len += 1) {
+            const u = std.mem.readInt(u16, data[unit_len * 2 ..][0..2], .little);
+            if (u == 0) break;
+        }
+        const units = try allocator.alloc(u16, unit_len);
+        defer allocator.free(units);
+        for (0..unit_len) |i| {
+            units[i] = std.mem.readInt(u16, data[i * 2 ..][0..2], .little);
+        }
+        return try std.unicode.utf16LeToUtf8Alloc(allocator, units);
+    }
+    if (isHtmlFormatId(fmt_id)) {
+        return try unwrapCfHtml(allocator, data);
+    }
+    return null;
+}
+
+/// The "HTML Format" ID is registered at runtime, so cache it per process.
+var html_format_id_cache: UINT = 0;
+fn htmlFormatId() UINT {
+    if (html_format_id_cache != 0) return html_format_id_cache;
+    // "HTML Format" as UTF-16LE, NUL-terminated.
+    const name_w = std.unicode.utf8ToUtf16LeStringLiteral("HTML Format");
+    html_format_id_cache = RegisterClipboardFormatW(name_w);
+    return html_format_id_cache;
+}
+fn isHtmlFormatId(fmt_id: UINT) bool {
+    return fmt_id != 0 and fmt_id == htmlFormatId();
+}
+
+/// Wrap a raw HTML fragment in the CF_HTML header. The header carries byte
+/// offsets (into the final UTF-8 buffer) for the full document and the
+/// fragment, which Windows apps require.
+fn wrapCfHtml(allocator: Allocator, fragment: []const u8) ![]u8 {
+    // The header has fixed-width zero-padded offsets so we can compute lengths
+    // before filling them in. Template with 10-digit offsets.
+    const prefix =
+        "Version:0.9\r\n" ++
+        "StartHTML:0000000000\r\n" ++
+        "EndHTML:0000000000\r\n" ++
+        "StartFragment:0000000000\r\n" ++
+        "EndFragment:0000000000\r\n";
+    const frag_open = "<html><body>\r\n<!--StartFragment-->";
+    const frag_close = "<!--EndFragment-->\r\n</body></html>";
+
+    const header_len = prefix.len;
+    const start_html = header_len;
+    const start_fragment = header_len + frag_open.len;
+    const end_fragment = start_fragment + fragment.len;
+    const end_html = end_fragment + frag_close.len;
+
+    var buf = try allocator.alloc(u8, end_html);
+    var w: usize = 0;
+    @memcpy(buf[w..][0..prefix.len], prefix);
+    w += prefix.len;
+    @memcpy(buf[w..][0..frag_open.len], frag_open);
+    w += frag_open.len;
+    @memcpy(buf[w..][0..fragment.len], fragment);
+    w += fragment.len;
+    @memcpy(buf[w..][0..frag_close.len], frag_close);
+
+    // Patch the offsets in place (each is a 10-digit field after its label).
+    patchOffset(buf, "StartHTML:", start_html);
+    patchOffset(buf, "EndHTML:", end_html);
+    patchOffset(buf, "StartFragment:", start_fragment);
+    patchOffset(buf, "EndFragment:", end_fragment);
+    return buf;
+}
+
+/// Overwrite the 10-digit zero-padded number following `label` with `value`.
+fn patchOffset(buf: []u8, comptime label: []const u8, value: usize) void {
+    const idx = std.mem.indexOf(u8, buf, label) orelse return;
+    const num_start = idx + label.len;
+    var v = value;
+    var i: usize = 10;
+    while (i > 0) {
+        i -= 1;
+        buf[num_start + i] = '0' + @as(u8, @intCast(v % 10));
+        v /= 10;
+    }
+}
+
+/// Extract the fragment from a CF_HTML blob. Uses StartFragment/EndFragment if
+/// present; otherwise returns everything after the header (double CRLF), or the
+/// whole input as a fallback.
+fn unwrapCfHtml(allocator: Allocator, data: []const u8) ![]u8 {
+    const start = parseHeaderOffset(data, "StartFragment:");
+    const end = parseHeaderOffset(data, "EndFragment:");
+    if (start != null and end != null and end.? <= data.len and start.? <= end.?) {
+        return allocator.dupe(u8, data[start.?..end.?]);
+    }
+    return allocator.dupe(u8, data);
+}
+
+fn parseHeaderOffset(data: []const u8, label: []const u8) ?usize {
+    const idx = std.mem.indexOf(u8, data, label) orelse return null;
+    var i = idx + label.len;
+    var value: usize = 0;
+    var seen = false;
+    while (i < data.len and data[i] >= '0' and data[i] <= '9') : (i += 1) {
+        value = value * 10 + (data[i] - '0');
+        seen = true;
+    }
+    return if (seen) value else null;
+}
+
 pub fn writeFormat(allocator: Allocator, format: []const u8, data: []const u8) !void {
-    const id = try formatNameToId(allocator, format);
-    if (OpenClipboard(null) == .FALSE) return error.PasteboardUnavailable;
-    defer _ = CloseClipboard();
-    _ = EmptyClipboard();
-    const hmem = GlobalAlloc(GMEM_MOVEABLE, data.len) orelse return error.PasteboardUnavailable;
-    const dest = GlobalLock(hmem) orelse return error.PasteboardUnavailable;
-    const dest_slice: [*]u8 = @ptrCast(dest);
-    @memcpy(dest_slice[0..data.len], data);
-    _ = GlobalUnlock(hmem);
-    if (SetClipboardData(id, hmem) == null) return error.PasteboardUnavailable;
-    // SetClipboardData takes ownership — do NOT free hmem
+    const pair = FormatDataPair{ .format = format, .data = data };
+    const pairs = [_]FormatDataPair{pair};
+    return writeMultiple(allocator, &pairs);
 }
 
 pub fn writeMultiple(allocator: Allocator, pairs: []const FormatDataPair) !void {
@@ -343,11 +492,18 @@ pub fn writeMultiple(allocator: Allocator, pairs: []const FormatDataPair) !void 
     _ = EmptyClipboard();
     for (pairs) |pair| {
         const id = formatNameToId(allocator, pair.format) catch continue;
-        const hmem = GlobalAlloc(GMEM_MOVEABLE, pair.data.len) orelse continue;
+
+        // Transcode into the encoding Windows expects for this format.
+        const encoded = encodeForWrite(allocator, id, pair.data) catch null;
+        defer if (encoded) |e| allocator.free(e);
+        const bytes = encoded orelse pair.data;
+
+        const hmem = GlobalAlloc(GMEM_MOVEABLE, bytes.len) orelse continue;
         const dest = GlobalLock(hmem) orelse continue;
         const dest_slice: [*]u8 = @ptrCast(dest);
-        @memcpy(dest_slice[0..pair.data.len], pair.data);
+        @memcpy(dest_slice[0..bytes.len], bytes);
         _ = GlobalUnlock(hmem);
+        // SetClipboardData takes ownership of hmem on success.
         _ = SetClipboardData(id, hmem);
     }
 }
