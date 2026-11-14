@@ -4,7 +4,7 @@ const clipboard = @import("clipboard");
 const web_custom_data = @import("web_custom_data");
 const osc52 = @import("osc52");
 
-const version = "0.4.4";
+const version = "0.4.5";
 
 const Allocator = std.mem.Allocator;
 const Io = std.Io;
@@ -612,6 +612,9 @@ fn cmdRead(allocator: Allocator, io: Io, args: []const [:0]const u8) !void {
     }
 }
 
+/// Upper bound on data read from stdin for `write`.
+const max_stdin_bytes = 100 * 1024 * 1024;
+
 fn cmdWrite(allocator: Allocator, io: Io, args: []const [:0]const u8) !void {
     var inline_data: ?[]const u8 = null;
     var osc52_mode = false;
@@ -653,7 +656,7 @@ fn cmdWrite(allocator: Allocator, io: Io, args: []const [:0]const u8) !void {
             const stdin_file = File.stdin();
             var readbuf: [4096]u8 = undefined;
             var r = stdin_file.readerStreaming(io, &readbuf);
-            const data = try r.interface.readAlloc(allocator, 1024 * 1024 * 100);
+            const data = try r.interface.allocRemaining(allocator, .limited(max_stdin_bytes));
             defer allocator.free(data);
             return writeOsc52(io, data);
         }
@@ -675,7 +678,7 @@ fn cmdWrite(allocator: Allocator, io: Io, args: []const [:0]const u8) !void {
         const stdin_file = File.stdin();
         var readbuf: [4096]u8 = undefined;
         var r = stdin_file.readerStreaming(io, &readbuf);
-        const data = try r.interface.readAlloc(allocator, 1024 * 1024 * 100); // 100MB max
+        const data = try r.interface.allocRemaining(allocator, .limited(max_stdin_bytes));
         defer allocator.free(data);
         try clipboard.writeFormat(allocator, fmt, data);
     }

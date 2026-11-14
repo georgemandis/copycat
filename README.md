@@ -25,8 +25,8 @@ scoop install georgemandis/copycat
 
 ```bash
 # Download the .deb for your architecture (amd64 or arm64)
-curl -LO https://github.com/georgemandis/copycat/releases/download/v0.4.4/copycat_0.4.4_amd64.deb
-sudo dpkg -i copycat_0.4.4_amd64.deb
+curl -LO https://github.com/georgemandis/copycat/releases/download/v0.4.5/copycat_0.4.5_amd64.deb
+sudo dpkg -i copycat_0.4.5_amd64.deb
 ```
 
 ### Pre-built binaries
